@@ -380,7 +380,7 @@ PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py \
 The verified platform behavior and remaining concurrency limitation are in
 [google-sheets-platform-verification.md](references/google-sheets-platform-verification.md).
 
-QBO destinations must pin `realm_id`, explicitly select `transaction_type` as
+QBO destinations must pin a numeric `realm_id`, explicitly select `transaction_type` as
 `purchase`, `bill`, or `journalentry`, and provide `category_account_ids`.
 Purchase and JournalEntry also require `balancing_account_id`. Bill requires an
 `employee_vendor_ids` mapping or `default_employee_vendor_id`. Never infer an
@@ -407,6 +407,13 @@ approval brief. Later calls poll `kolo quickbooks write-status`; only
 and expenses to `synced`. Do not repeat a claim with no stored brief number or
 an unknown/failed result. A rejected or expired brief may create a new attempt
 only with the explicit `--retry-terminal` flag.
+
+Reference refreshes paginate to a hard 1,000-row limit per entity instead of
+silently caching an incomplete first page. QBO request bodies are limited to
+100 KB. Configure `max_execution_checks` from 1 to 100 (default 12); if an
+`executed` brief repeatedly has no result, ExpenseFlow marks the run
+`review_required`, marks its items `unknown`, and records an operator-review
+audit event without submitting another write.
 
 Reports must contain one currency per QBO transaction. The adapter stores QBO
 entity ID and SyncToken when returned. Current Kolo write help exposes JSON

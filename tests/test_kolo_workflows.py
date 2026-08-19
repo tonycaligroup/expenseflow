@@ -293,9 +293,42 @@ class KoloWorkflowTests(unittest.TestCase):
             upsert_accounting_destination(
                 self.gateway,
                 "default",
-                {"destination_type": "qbo", "config": {"realm_id": "realm_1"}},
+                {"destination_type": "qbo", "config": {"realm_id": "1234567890"}},
             )
         self.assertEqual(ctx.exception.code, "invalid_qbo_transaction_type")
+
+    def test_qbo_destination_rejects_non_numeric_realm(self):
+        with self.assertRaises(ExpenseFlowError) as ctx:
+            upsert_accounting_destination(
+                self.gateway,
+                "default",
+                {
+                    "destination_type": "qbo",
+                    "config": {
+                        "realm_id": "realm_1",
+                        "transaction_type": "bill",
+                        "category_account_ids": {"*": "41"},
+                    },
+                },
+            )
+        self.assertEqual(ctx.exception.code, "invalid_qbo_realm_id")
+
+    def test_qbo_destination_bounds_execution_checks(self):
+        with self.assertRaises(ExpenseFlowError) as ctx:
+            upsert_accounting_destination(
+                self.gateway,
+                "default",
+                {
+                    "destination_type": "qbo",
+                    "config": {
+                        "realm_id": "1234567890",
+                        "transaction_type": "bill",
+                        "category_account_ids": {"*": "41"},
+                        "max_execution_checks": 0,
+                    },
+                },
+            )
+        self.assertEqual(ctx.exception.code, "invalid_qbo_execution_checks")
 
     def test_qbo_destination_normalizes_company_id_alias_to_realm_id(self):
         upsert_accounting_destination(
@@ -304,7 +337,7 @@ class KoloWorkflowTests(unittest.TestCase):
             {
                 "destination_type": "qbo",
                 "config": {
-                    "company_id": "realm_1",
+                    "company_id": "1234567890",
                     "transaction_type": "journalentry",
                     "category_account_ids": {"*": 41},
                     "balancing_account_id": 99,
@@ -313,7 +346,7 @@ class KoloWorkflowTests(unittest.TestCase):
         )
 
         config = self.gateway.get_record(ACCOUNTING_DESTINATION, "default")["payload"]["config"]
-        self.assertEqual(config["realm_id"], "realm_1")
+        self.assertEqual(config["realm_id"], "1234567890")
         self.assertNotIn("company_id", config)
         self.assertEqual(config["category_account_ids"]["*"], "41")
         self.assertEqual(config["balancing_account_id"], "99")

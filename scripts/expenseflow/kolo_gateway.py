@@ -256,7 +256,15 @@ class FakeKoloGateway:
             (name for name in self.qbo_reads if f"from {name}".lower() in query_text.lower()),
             None,
         )
-        return deepcopy(self.qbo_reads.get(entity, {"QueryResponse": {}}))
+        response = deepcopy(self.qbo_reads.get(entity, {"QueryResponse": {}}))
+        if entity and isinstance(response.get("QueryResponse", {}).get(entity), list):
+            start_match = re.search(r"\bstartposition\s+(\d+)", query_text, re.IGNORECASE)
+            count_match = re.search(r"\bmaxresults\s+(\d+)", query_text, re.IGNORECASE)
+            if start_match and count_match:
+                start = int(start_match.group(1)) - 1
+                count = int(count_match.group(1))
+                response["QueryResponse"][entity] = response["QueryResponse"][entity][start : start + count]
+        return response
 
     def quickbooks_write(
         self,

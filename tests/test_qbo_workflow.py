@@ -17,7 +17,7 @@ from scripts.expenseflow.kolo_workflows import (
 CONNECTED = {
     "connected": True,
     "environment": "sandbox",
-    "realms": [{"realm_id": "realm_1", "company_name": "Test Company", "needs_reconnect": False}],
+    "realms": [{"realm_id": "1234567890", "company_name": "Test Company", "needs_reconnect": False}],
 }
 
 
@@ -86,6 +86,52 @@ class QboWorkflowTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(gateway.get_record(EXPENSE_REPORT, "er_1")["status"], "synced")
 
+    def test_stuck_execution_requires_operator_review_after_bounded_checks(self):
+        gateway = self._gateway(max_execution_checks=2)
+        pending = sync_approved_report_qbo(gateway, "er_1")
+        gateway.set_qbo_write_status(pending["brief_number"], "executed", None)
+
+        first = sync_approved_report_qbo(gateway, "er_1")
+        second = sync_approved_report_qbo(gateway, "er_1")
+
+        self.assertEqual(first["status"], "execution_pending")
+        self.assertEqual(second["status"], "review_required")
+        self.assertEqual(second["export_run"]["error_code"], "qbo_execution_timeout")
+        self.assertEqual(gateway.list_records(EXPORT_ITEM)[0]["status"], "unknown")
+        self.assertEqual(len(gateway.audit_events), 1)
+
+    def test_bill_sync_marks_report_synced(self):
+        gateway = self._gateway(transaction_type="bill")
+        pending = sync_approved_report_qbo(gateway, "er_1")
+        gateway.set_qbo_write_status(
+            pending["brief_number"],
+            "executed",
+            {"Bill": {"Id": "bill_123", "SyncToken": "0"}},
+        )
+
+        result = sync_approved_report_qbo(gateway, "er_1")
+
+        self.assertEqual(result["status"], "ok")
+        write = next(op for op in gateway.qbo_operations if op["operation"] == "write")
+        self.assertEqual(write["path"], "bill")
+        self.assertEqual(write["body"]["VendorRef"], {"value": "vendor_7"})
+
+    def test_journal_entry_sync_marks_report_synced(self):
+        gateway = self._gateway(transaction_type="journalentry")
+        pending = sync_approved_report_qbo(gateway, "er_1")
+        gateway.set_qbo_write_status(
+            pending["brief_number"],
+            "executed",
+            {"JournalEntry": {"Id": "je_123", "SyncToken": "0"}},
+        )
+
+        result = sync_approved_report_qbo(gateway, "er_1")
+
+        self.assertEqual(result["status"], "ok")
+        write = next(op for op in gateway.qbo_operations if op["operation"] == "write")
+        self.assertEqual(write["path"], "journalentry")
+        self.assertEqual(write["body"]["Line"][-1]["JournalEntryLineDetail"]["PostingType"], "Credit")
+
     def test_rejected_brief_can_only_retry_explicitly(self):
         gateway = self._gateway()
         pending = sync_approved_report_qbo(gateway, "er_1")
@@ -148,20 +194,47 @@ class QboWorkflowTests(unittest.TestCase):
         self.assertEqual(len(calls), 7)
         self.assertTrue(all("maxresults 100" in op["query"]["query"] for op in calls))
 
-    def _gateway(self, gateway=None):
+    def test_refresh_cache_paginates_reference_entities(self):
+        gateway = self._gateway()
+        gateway.qbo_reads = {
+            "Account": {
+                "QueryResponse": {
+                    "Account": [{"Id": str(index), "Name": f"Account {index}"} for index in range(101)]
+                }
+            }
+        }
+
+        result = refresh_qbo_reference_cache(gateway)
+
+        self.assertEqual(len(result["references"]["accounts"]), 101)
+        account_calls = [
+            op
+            for op in gateway.qbo_operations
+            if op["operation"] == "call" and "from Account" in op["query"]["query"]
+        ]
+        self.assertEqual(len(account_calls), 2)
+        self.assertIn("startposition 101", account_calls[1]["query"]["query"])
+
+    def _gateway(self, gateway=None, transaction_type="purchase", max_execution_checks=12):
         gateway = gateway or FakeKoloGateway(qbo_status=CONNECTED)
+        config = {
+            "realm_id": "1234567890",
+            "transaction_type": transaction_type,
+            "category_account_ids": {"Office Supplies": "41"},
+            "max_execution_checks": max_execution_checks,
+        }
+        if transaction_type in {"purchase", "journalentry"}:
+            config["balancing_account_id"] = "99"
+        if transaction_type == "purchase":
+            config["payment_type"] = "Cash"
+        if transaction_type == "bill":
+            config["employee_vendor_ids"] = {"7": "vendor_7"}
         upsert_accounting_destination(
             gateway,
             "default",
             {
                 "destination_type": "qbo",
-                "config": {
-                    "realm_id": "realm_1",
-                    "transaction_type": "purchase",
-                    "category_account_ids": {"Office Supplies": "41"},
-                    "balancing_account_id": "99",
-                    "payment_type": "Cash",
-                },
+                "config": config,
             },
         )
         gateway.upsert_record(

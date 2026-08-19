@@ -24,10 +24,11 @@ or writes were attempted.
 
 ## Deterministic Design
 
-1. Pin a realm and require explicit `purchase`, `bill`, or `journalentry`
+1. Pin a numeric realm and require explicit `purchase`, `bill`, or `journalentry`
    configuration. Purchase is not assumed to be universally correct.
-2. Refresh bounded account/vendor/customer/tax/class/department/currency reads
-   and persist only allowlisted reference fields.
+2. Refresh paginated account/vendor/customer/tax/class/department/currency
+   reads, stop at a hard 1,000-row limit per entity, and persist only allowlisted
+   reference fields.
 3. Build canonical JSON in code and hash the path plus body.
 4. Create one permanent `skill.export_run` claim before opening a brief and one
    `skill.export_item` per expense line.
@@ -37,6 +38,10 @@ or writes were attempted.
    moves the report and expenses to `synced`.
 7. Permit a new attempt after `rejected` or `expired` only through an explicit
    operator retry. Never auto-retry `failed` or unknown outcomes.
+8. After a bounded number of `executed` responses with no result, mark the run
+   `review_required` and its items `unknown`, then emit an operator-review audit
+   event. Continue to forbid a second write.
+9. Reject JSON bodies over 100 KB before invoking the Kolo CLI.
 
 ## Unverified Until Connection
 

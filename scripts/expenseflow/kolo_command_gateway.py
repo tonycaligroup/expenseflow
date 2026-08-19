@@ -242,6 +242,13 @@ class KoloCommandGateway:
         http_method="post",
         query=None,
     ):
+        encoded_body = json.dumps(body, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        if len(encoded_body.encode("utf-8")) > 100_000:
+            raise ExpenseFlowError(
+                "qbo_payload_too_large",
+                "QuickBooks payload exceeds the 100 KB ExpenseFlow safety limit.",
+                details={"path": str(path)},
+            )
         command = [
             "kolo",
             "quickbooks",
@@ -252,7 +259,7 @@ class KoloCommandGateway:
             "--http-method",
             http_method,
             "--body",
-            json.dumps(body, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+            encoded_body,
         ]
         if realm_id is not None:
             command.extend(["--realm", str(realm_id)])

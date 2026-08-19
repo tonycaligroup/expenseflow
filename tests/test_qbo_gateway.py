@@ -34,7 +34,7 @@ class QboGatewayTests(unittest.TestCase):
 
         gateway.quickbooks_call(
             "query",
-            realm_id="realm_1",
+            realm_id="1234567890",
             query={"z": "last", "query": "select * from Account maxresults 5"},
         )
 
@@ -49,7 +49,7 @@ class QboGatewayTests(unittest.TestCase):
                 "accounting",
                 "-q",
                 "--realm",
-                "realm_1",
+                "1234567890",
                 "--query",
                 "query=select * from Account maxresults 5",
                 "--query",
@@ -64,7 +64,7 @@ class QboGatewayTests(unittest.TestCase):
         result = gateway.quickbooks_write(
             "purchase",
             {"b": 2, "a": 1},
-            realm_id="realm_1",
+            realm_id="1234567890",
             request_id="request_1",
             reason="Approved report er_1",
             session_key="session_1",
@@ -84,6 +84,16 @@ class QboGatewayTests(unittest.TestCase):
             gateway.quickbooks_write("purchase", {"Line": []})
 
         self.assertEqual(ctx.exception.code, "missing_qbo_brief_number")
+
+    def test_write_rejects_oversized_payload_before_runner(self):
+        runner = ScriptedRunner([])
+        gateway = KoloCommandGateway(runner=runner)
+
+        with self.assertRaises(ExpenseFlowError) as ctx:
+            gateway.quickbooks_write("purchase", {"PrivateNote": "x" * 100_001})
+
+        self.assertEqual(ctx.exception.code, "qbo_payload_too_large")
+        self.assertEqual(runner.commands, [])
 
     def test_write_status_normalizes_camel_case_execution_result(self):
         runner = ScriptedRunner([{"status": "EXECUTED", "executionResult": {"Purchase": {"Id": "1"}}}])

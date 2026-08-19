@@ -155,6 +155,17 @@ class QboExportTests(unittest.TestCase):
         self.assertEqual(entity["entity_id"], "123")
         self.assertEqual(entity["sync_token"], "0")
 
+    def test_entity_extraction_ignores_unrelated_nested_matches(self):
+        entity = extract_qbo_entity(
+            {
+                "unrelated": {"Purchase": {"Id": "wrong"}},
+                "response": {"Purchase": {"Id": "right", "SyncToken": "0"}},
+            },
+            "Purchase",
+        )
+
+        self.assertEqual(entity["entity_id"], "right")
+
     def test_execution_result_requires_entity_id(self):
         with self.assertRaises(ExpenseFlowError) as ctx:
             extract_qbo_entity({"Purchase": {"SyncToken": "0"}}, "Purchase")

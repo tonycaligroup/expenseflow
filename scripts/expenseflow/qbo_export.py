@@ -291,7 +291,7 @@ def _line_description(expense):
     note = str(expense.get("note") or "").strip()
     if note:
         parts.append(note)
-    return " | ".join(parts)[:4000]
+    return " | ".join(parts)[:1000]
 
 
 def _private_note(report, expenses):
@@ -304,17 +304,22 @@ def _private_note(report, expenses):
 
 
 def _find_entity(value, expected_key):
-    if isinstance(value, dict):
-        for key, item in value.items():
+    current = value
+    for _ in range(4):
+        if not isinstance(current, dict):
+            return None
+        for key, item in current.items():
             if str(key).lower() == expected_key and isinstance(item, dict):
                 return item
-        for item in value.values():
-            found = _find_entity(item, expected_key)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for item in value:
-            found = _find_entity(item, expected_key)
-            if found is not None:
-                return found
+        envelope = next(
+            (
+                current[key]
+                for key in ("execution_result", "executionResult", "result", "response", "body", "data")
+                if isinstance(current.get(key), dict)
+            ),
+            None,
+        )
+        if envelope is None:
+            return None
+        current = envelope
     return None

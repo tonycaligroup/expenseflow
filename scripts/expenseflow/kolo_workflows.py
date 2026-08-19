@@ -137,6 +137,11 @@ def _normalize_qbo_destination_config(config):
     realm_id = str(config.get("realm_id") or config.get("company_id") or "").strip()
     if not realm_id:
         raise ExpenseFlowError("missing_qbo_realm_id", "QuickBooks destination requires realm_id.")
+    if not realm_id.isdigit():
+        raise ExpenseFlowError(
+            "invalid_qbo_realm_id",
+            "QuickBooks realm_id must contain digits only.",
+        )
     transaction_type = str(config.get("transaction_type") or "").strip().lower()
     if transaction_type not in QBO_TRANSACTION_TYPES:
         raise ExpenseFlowError(
@@ -187,6 +192,19 @@ def _normalize_qbo_destination_config(config):
         for user_id, vendor_id in employee_vendor_ids.items()
         if str(user_id).strip() and str(vendor_id).strip()
     }
+    try:
+        max_execution_checks = int(config.get("max_execution_checks", 12))
+    except (TypeError, ValueError):
+        raise ExpenseFlowError(
+            "invalid_qbo_execution_checks",
+            "QuickBooks max_execution_checks must be an integer from 1 to 100.",
+        )
+    if not 1 <= max_execution_checks <= 100:
+        raise ExpenseFlowError(
+            "invalid_qbo_execution_checks",
+            "QuickBooks max_execution_checks must be an integer from 1 to 100.",
+        )
+    config["max_execution_checks"] = max_execution_checks
     for field in (
         "balancing_account_id",
         "accounts_payable_account_id",
@@ -1351,11 +1369,7 @@ def refresh_qbo_reference_cache(gateway, org_id="default"):
     entities = ("Account", "Vendor", "Customer", "TaxCode", "Class", "Department", "Currency")
     responses = {}
     for entity in entities:
-        responses[entity] = gateway.quickbooks_call(
-            "query",
-            realm_id=config["realm_id"],
-            query={"query": f"select * from {entity} maxresults 100"},
-        )
+        responses[entity] = _query_qbo_reference_entity(gateway, config["realm_id"], entity)
     cache = {
         "org_id": str(org_id),
         "realm_id": config["realm_id"],
@@ -1367,6 +1381,39 @@ def refresh_qbo_reference_cache(gateway, org_id="default"):
     }
     gateway.upsert_record(ACCOUNTING_REFERENCE_CACHE, org_id, cache, "active")
     return cache
+
+
+def _query_qbo_reference_entity(gateway, realm_id, entity, page_size=100, max_rows=1000):
+    rows = []
+    for start_position in range(1, max_rows + 1, page_size):
+        response = gateway.quickbooks_call(
+            "query",
+            realm_id=realm_id,
+            query={
+                "query": (
+                    f"select * from {entity} startposition {start_position} "
+                    f"maxresults {page_size}"
+                )
+            },
+        )
+        query_response = response.get("QueryResponse", response.get("queryResponse", {}))
+        page = query_response.get(entity, query_response.get(entity.lower(), []))
+        if isinstance(page, dict):
+            page = [page]
+        if not isinstance(page, list):
+            raise ExpenseFlowError(
+                "invalid_qbo_query_response",
+                "QuickBooks returned an invalid reference query response.",
+                details={"entity": entity},
+            )
+        rows.extend(page)
+        if len(page) < page_size:
+            return {"QueryResponse": {entity: rows}}
+    raise ExpenseFlowError(
+        "qbo_reference_cache_limit",
+        "QuickBooks reference data exceeds the 1,000-row cache safety limit.",
+        details={"entity": entity, "max_rows": max_rows},
+    )
 
 
 def sync_approved_report_qbo(
@@ -1462,6 +1509,8 @@ def _submit_qbo_sync(
         "path": transaction["path"],
         "payload_hash": transaction["payload_hash"],
         "request_id": transaction["request_id"],
+        "max_execution_checks": config.get("max_execution_checks", 12),
+        "execution_check_count": 0,
         "attempt": attempt,
         "status": "claimed",
         "claimed_at": utc_now(),
@@ -1561,13 +1610,54 @@ def _reconcile_qbo_sync(gateway, report, expenses, run, transaction):
             "export_run": terminal_run,
             "items": _qbo_items_for_run(gateway, run["export_run_id"]),
         }
-    if brief_status != "executed" or brief.get("execution_result") is None:
+    if brief_status == "executed" and brief.get("execution_result") is None:
+        execution_check_count = int(run.get("execution_check_count", 0)) + 1
         pending_run = dict(run)
-        pending_run["status"] = "executing" if brief_status == "executed" else "approval_pending"
+        pending_run["execution_check_count"] = execution_check_count
+        pending_run["last_checked_at"] = utc_now()
+        if execution_check_count >= int(run.get("max_execution_checks", 12)):
+            pending_run["status"] = "review_required"
+            pending_run["error_code"] = "qbo_execution_timeout"
+            gateway.upsert_record(EXPORT_RUN, run["export_run_id"], pending_run, "review_required")
+            for item in _qbo_items_for_run(gateway, run["export_run_id"]):
+                item = dict(item)
+                item["status"] = "unknown"
+                item["error_code"] = "qbo_execution_timeout"
+                gateway.upsert_record(EXPORT_ITEM, item["export_item_id"], item, "unknown")
+            gateway.log_action(
+                "skill.expense_report",
+                "QuickBooks sync requires operator review",
+                f"expenseflow:qbo-execution-timeout:{run['export_run_id']}",
+                {
+                    "report_id": report["report_id"],
+                    "export_run_id": run["export_run_id"],
+                    "brief_number": run["brief_number"],
+                    "error_code": "qbo_execution_timeout",
+                },
+            )
+            return {
+                "status": "review_required",
+                "destination": "qbo",
+                "report": report,
+                "export_run": pending_run,
+                "items": _qbo_items_for_run(gateway, run["export_run_id"]),
+            }
+        pending_run["status"] = "executing"
+        gateway.upsert_record(EXPORT_RUN, run["export_run_id"], pending_run, "executing")
+        return {
+            "status": "execution_pending",
+            "destination": "qbo",
+            "report": report,
+            "export_run": pending_run,
+            "items": _qbo_items_for_run(gateway, run["export_run_id"]),
+        }
+    if brief_status != "executed":
+        pending_run = dict(run)
+        pending_run["status"] = "approval_pending"
         pending_run["last_checked_at"] = utc_now()
         gateway.upsert_record(EXPORT_RUN, run["export_run_id"], pending_run, pending_run["status"])
         return {
-            "status": "execution_pending" if brief_status == "executed" else "approval_pending",
+            "status": "approval_pending",
             "destination": "qbo",
             "report": report,
             "export_run": pending_run,
