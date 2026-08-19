@@ -26,8 +26,9 @@ def normalize_receipt_attachment(data, settings=None):
         or ""
     ).strip()
     reference = str(data.get("reference") or data.get("receipt_url") or "").strip()
-    if not object_id and reference.startswith("kolo://obj/"):
-        object_id = reference.removeprefix("kolo://obj/").strip()
+    reference_object_id = _object_id_from_reference(reference)
+    if not object_id and reference_object_id:
+        object_id = reference_object_id
     if not object_id:
         raise ExpenseFlowError(
             "missing_receipt_object_id",
@@ -35,13 +36,16 @@ def normalize_receipt_attachment(data, settings=None):
         )
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", object_id):
         raise ExpenseFlowError("invalid_receipt_object_id", "Receipt object-store ID has an invalid format.")
-    expected_reference = f"kolo://obj/{object_id}"
-    if reference and reference != expected_reference:
+    supported_references = {
+        f"kolo://obj/{object_id}",
+        f"kolo-object://{object_id}",
+    }
+    if reference and reference not in supported_references:
         raise ExpenseFlowError(
             "receipt_reference_mismatch",
             "Receipt reference does not match the supplied object-store ID.",
         )
-    reference = reference or expected_reference
+    reference = reference or f"kolo://obj/{object_id}"
 
     filename = PurePath(str(data.get("filename") or "receipt")).name
     content_type = str(data.get("content_type") or data.get("contentType") or "").strip().lower()
@@ -77,6 +81,13 @@ def normalize_receipt_attachment(data, settings=None):
         "sha256": sha256,
         "stored_at": str(data.get("stored_at") or utc_now()),
     }
+
+
+def _object_id_from_reference(reference):
+    for prefix in ("kolo://obj/", "kolo-object://"):
+        if reference.startswith(prefix):
+            return reference.removeprefix(prefix).strip()
+    return ""
 
 
 def _optional_nonnegative_int(value, field):

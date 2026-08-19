@@ -8,7 +8,7 @@ Kolo ran the ExpenseFlow Phase 0 checks on 2026-08-19T00:59 UTC.
 | --- | --- | --- |
 | `contact-agent` returns correlation ID | Pass | Store returned `queueId` on `skill.approval_request.backchannel_queue_id`. |
 | `task-create` returns task ID | Pass | Store returned `task_id`; complete task after approval resolution. |
-| Receipt attachment path handling | Pass with constraint | Inbound files are staged under `media/inbound/*`; exact inbound context field names remain undocumented. |
+| Receipt attachment path handling | Pass with constraint | Live web attachments expose a `media://inbound/...` reference and resolve under Kolo's shared `.openclaw/media/inbound/` staging directory. |
 | `record-upsert` idempotency | Pass | Use record type + external ID as deterministic upsert key. |
 | Custom record statuses | Pass | Use ExpenseFlow lifecycle statuses directly. |
 | `log-action --idempotency-key` | Pass | Use deterministic idempotency keys for every audit event. |
@@ -52,13 +52,16 @@ Verify during implementation:
 
 ## Receipt And Reminder Verification
 
-Kolo reviewed the next milestone on 2026-08-19 without mutating records or
-sending platform messages.
+Kolo reviewed the next milestone on 2026-08-19, then ran a live synthetic
+receipt round trip against commit `d3fe325`.
 
-- Inbound attachments are staged as local files under `media/inbound/*` in the
-  active workspace. Some channels require attachment ingestion to be enabled.
-- `kolo file-upload FILE_PATH` returns `objectStoreObjectId` and a
-  `kolo://obj/...` reference. The command has no native idempotency.
+- The web message exposed `media://inbound/<filename>` and the live file
+  resolved under `.openclaw/media/inbound/<filename>`, not the active workspace.
+  The resolved path still contains the required `media/inbound` boundary.
+- `kolo file-upload FILE_PATH` returns `objectStoreObjectId`. The live reference
+  format is `kolo-object://<objectStoreObjectId>`; older observed responses used
+  `kolo://obj/<objectStoreObjectId>`. ExpenseFlow accepts and verifies both.
+  The command has no native idempotency.
 - Use a deterministic governed `skill.receipt` reservation before upload. Check
   and reuse a stored receipt record; do not automatically repeat an interrupted
   upload.
@@ -67,3 +70,10 @@ sending platform messages.
   ExpenseFlow organization.
 - `kolo task-complete --task-id <uuid>` deterministically completes the
   visibility task and is idempotent for an already completed task.
+
+The first live upload identified a reference-format incompatibility after the
+object had already been uploaded. A direct diagnostic `kolo file-upload` call
+created one additional synthetic object because uploads are not natively
+idempotent. The regression fix persists the upload response before validation,
+supports both reference formats, and can finalize a persisted `uploaded` or
+`upload_invalid` reservation without uploading the file again.

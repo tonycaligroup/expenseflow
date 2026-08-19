@@ -179,6 +179,17 @@ class KoloCommandGatewayTests(unittest.TestCase):
         self.assertEqual(result["reference"], "kolo://obj/01a-object")
         self.assertEqual(runner.commands[0], ["kolo", "file-upload", "media/inbound/receipt.png"])
 
+    def test_upload_file_preserves_live_object_reference(self):
+        runner = ScriptedRunner(
+            [{"objectStoreObjectId": "01a-object", "reference": "kolo-object://01a-object"}]
+        )
+        gateway = KoloCommandGateway(runner=runner)
+
+        result = gateway.upload_file("media/inbound/receipt.jpg")
+
+        self.assertEqual(result["object_store_object_id"], "01a-object")
+        self.assertEqual(result["reference"], "kolo-object://01a-object")
+
     def test_upload_file_requires_object_store_id(self):
         gateway = KoloCommandGateway(runner=ScriptedRunner([{"status": "ok"}]))
 

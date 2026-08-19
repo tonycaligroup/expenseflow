@@ -1,3 +1,4 @@
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -138,6 +139,68 @@ class ReceiptAndReminderWorkflowTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, "receipt_upload_incomplete")
         self.assertEqual(gateway.list_records(RECEIPT)[0]["status"], "upload_unknown")
+
+    def test_uploaded_receipt_can_be_finalized_without_second_platform_upload(self):
+        class LiveReferenceGateway(FakeKoloGateway):
+            def upload_file(self, file_path):
+                self.uploads.append(file_path)
+                return {
+                    "object_store_object_id": "01a-live-object",
+                    "reference": "kolo-object://01a-live-object",
+                }
+
+        gateway = LiveReferenceGateway()
+        upsert_user_profile(gateway, SUBMITTER)
+        upsert_expense_settings(gateway, "default", {"expense_admin_user_ids": [99]})
+        capture_expense(gateway, self._expense_data(), 1, expense_id="exp_live")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "media" / "inbound" / "receipt.jpg"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"synthetic receipt bytes")
+            first = upload_and_attach_receipt(gateway, "exp_live", path, 1)
+            repeated = upload_and_attach_receipt(gateway, "exp_live", path, 1)
+
+        self.assertEqual(first["status"], "attached")
+        self.assertEqual(repeated["status"], "already_attached")
+        self.assertEqual(len(gateway.uploads), 1)
+        record = gateway.list_records(RECEIPT, status="stored")[0]["payload"]
+        self.assertEqual(record["upload"]["reference"], "kolo-object://01a-live-object")
+        self.assertNotIn("file_path", record)
+
+    def test_upload_invalid_reservation_recovers_without_platform_upload(self):
+        capture_expense(self.gateway, self._expense_data(), 1, expense_id="exp_recover")
+        receipt_bytes = b"synthetic receipt bytes"
+        sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+        receipt_id = f"receipt_exp_recover_{sha256}"
+        self.gateway.upsert_record(
+            RECEIPT,
+            receipt_id,
+            {
+                "receipt_id": receipt_id,
+                "expense_id": "exp_recover",
+                "org_id": "default",
+                "status": "upload_invalid",
+                "sha256": sha256,
+                "filename": "receipt.jpg",
+                "content_type": "image/jpeg",
+                "size_bytes": len(receipt_bytes),
+                "upload": {
+                    "object_store_object_id": "01a-recovered-object",
+                    "reference": "kolo-object://01a-recovered-object",
+                },
+                "schema_version": 1,
+            },
+            "upload_invalid",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "media" / "inbound" / "receipt.jpg"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(receipt_bytes)
+            result = upload_and_attach_receipt(self.gateway, "exp_recover", path, 1)
+
+        self.assertEqual(result["status"], "attached")
+        self.assertEqual(self.gateway.uploads, [])
+        self.assertEqual(self.gateway.get_record(RECEIPT, receipt_id)["status"], "stored")
 
     def test_upload_rejects_files_outside_kolo_inbound_staging(self):
         self._capture()

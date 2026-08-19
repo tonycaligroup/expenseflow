@@ -526,6 +526,9 @@ def upload_and_attach_receipt(gateway, expense_id, file_path, acting_user_id, or
                 acting_user_id,
                 org_id,
             )
+        if existing_receipt.get("status") in {"uploaded", "upload_invalid"} and existing_receipt.get("upload"):
+            receipt = _finalize_receipt_upload(gateway, receipt_id, existing_receipt, settings)
+            return attach_receipt_reference(gateway, expense_id, receipt, acting_user_id, org_id)
         raise ExpenseFlowError(
             "receipt_upload_incomplete",
             "A prior upload attempt for this receipt did not finish cleanly; review the reserved receipt record before retrying.",
@@ -560,20 +563,39 @@ def upload_and_attach_receipt(gateway, expense_id, file_path, acting_user_id, or
         reservation["completed_at"] = utc_now()
         gateway.upsert_record(RECEIPT, receipt_id, reservation, reservation["status"])
         raise
-    receipt_data = {
-        **upload_metadata,
-        **uploaded,
-        "filename": upload_metadata.get("filename") or path.name,
-        "content_type": content_type,
-        "size_bytes": size_bytes,
-        "sha256": sha256,
+    reservation["status"] = "uploaded"
+    reservation["upload"] = {
+        "object_store_object_id": uploaded["object_store_object_id"],
+        "reference": uploaded["reference"],
     }
-    receipt = normalize_receipt_attachment(receipt_data, settings)
+    reservation["uploaded_at"] = utc_now()
+    gateway.upsert_record(RECEIPT, receipt_id, reservation, "uploaded")
+    receipt = _finalize_receipt_upload(gateway, receipt_id, reservation, settings)
+    return attach_receipt_reference(gateway, expense_id, receipt, acting_user_id, org_id)
+
+
+def _finalize_receipt_upload(gateway, receipt_id, reservation, settings):
+    receipt_data = {
+        **reservation["upload"],
+        "filename": reservation["filename"],
+        "content_type": reservation["content_type"],
+        "size_bytes": reservation["size_bytes"],
+        "sha256": reservation["sha256"],
+    }
+    try:
+        receipt = normalize_receipt_attachment(receipt_data, settings)
+    except ExpenseFlowError as exc:
+        reservation["status"] = "upload_invalid"
+        reservation["validation_error"] = exc.code
+        reservation["completed_at"] = utc_now()
+        gateway.upsert_record(RECEIPT, receipt_id, reservation, reservation["status"])
+        raise
     reservation["status"] = "stored"
     reservation["attachment"] = receipt
+    reservation.pop("validation_error", None)
     reservation["completed_at"] = utc_now()
     gateway.upsert_record(RECEIPT, receipt_id, reservation, "stored")
-    return attach_receipt_reference(gateway, expense_id, receipt, acting_user_id, org_id)
+    return receipt
 
 
 def _persist_expense(gateway, candidate, org_id, submitter_user_id):

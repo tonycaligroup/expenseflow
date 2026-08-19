@@ -29,6 +29,25 @@ class ReceiptEngineTests(unittest.TestCase):
         self.assertEqual(receipt["object_store_object_id"], "obj_456")
         self.assertEqual(receipt["content_type"], "application/pdf")
 
+    def test_accepts_live_kolo_object_reference(self):
+        receipt = normalize_receipt_attachment(
+            {
+                "objectStoreObjectId": "01a-live-object",
+                "reference": "kolo-object://01a-live-object",
+                "filename": "receipt.jpg",
+            }
+        )
+
+        self.assertEqual(receipt["object_store_object_id"], "01a-live-object")
+        self.assertEqual(receipt["reference"], "kolo-object://01a-live-object")
+
+    def test_derives_object_id_from_live_kolo_reference(self):
+        receipt = normalize_receipt_attachment(
+            {"reference": "kolo-object://01a-derived", "filename": "receipt.webp"}
+        )
+
+        self.assertEqual(receipt["object_store_object_id"], "01a-derived")
+
     def test_rejects_unsupported_receipt_type(self):
         with self.assertRaises(ExpenseFlowError) as ctx:
             normalize_receipt_attachment(
@@ -42,6 +61,16 @@ class ReceiptEngineTests(unittest.TestCase):
                 {
                     "objectStoreObjectId": "obj_123",
                     "reference": "kolo://obj/obj_456",
+                    "filename": "receipt.png",
+                }
+            )
+        self.assertEqual(ctx.exception.code, "receipt_reference_mismatch")
+
+        with self.assertRaises(ExpenseFlowError) as ctx:
+            normalize_receipt_attachment(
+                {
+                    "objectStoreObjectId": "obj_123",
+                    "reference": "kolo-object://obj_456",
                     "filename": "receipt.png",
                 }
             )
