@@ -205,6 +205,98 @@ class KoloCommandGateway:
     def sheets_append_values(self, spreadsheet_id, a1_range, values):
         return self.sheets_gateway.append_values(spreadsheet_id, a1_range, values)
 
+    def quickbooks_status(self):
+        result = self.runner(["kolo", "quickbooks", "status"])
+        if not isinstance(result, dict) or not isinstance(result.get("realms", []), list):
+            raise ExpenseFlowError(
+                "invalid_qbo_status_response",
+                "Kolo returned an invalid QuickBooks connection status.",
+            )
+        return result
+
+    def quickbooks_call(self, path, realm_id=None, query=None, api="accounting"):
+        command = ["kolo", "quickbooks", "call", str(path), "--api", api, "-q"]
+        if realm_id is not None:
+            command.extend(["--realm", str(realm_id)])
+        for key, value in sorted((query or {}).items()):
+            command.extend(["--query", f"{key}={value}"])
+        result = self.runner(command)
+        if not isinstance(result, dict):
+            raise ExpenseFlowError(
+                "invalid_qbo_response",
+                "Kolo returned an invalid QuickBooks read response.",
+                details={"path": str(path)},
+            )
+        return result
+
+    def quickbooks_write(
+        self,
+        path,
+        body,
+        realm_id=None,
+        request_id=None,
+        reason=None,
+        session_key=None,
+        chat_id=None,
+        api="accounting",
+        http_method="post",
+        query=None,
+    ):
+        command = [
+            "kolo",
+            "quickbooks",
+            "write",
+            str(path),
+            "--api",
+            api,
+            "--http-method",
+            http_method,
+            "--body",
+            json.dumps(body, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        ]
+        if realm_id is not None:
+            command.extend(["--realm", str(realm_id)])
+        if request_id:
+            command.extend(["--request-id", str(request_id)])
+        if reason:
+            command.extend(["--reason", str(reason)])
+        if session_key:
+            command.extend(["--session-key", str(session_key)])
+        if chat_id:
+            command.extend(["--chat-id", str(chat_id)])
+        for key, value in sorted((query or {}).items()):
+            command.extend(["--query", f"{key}={value}"])
+        result = self.runner(command)
+        brief_number = (
+            result.get("brief_number")
+            or result.get("briefNumber")
+            or result.get("brief_id")
+            or result.get("briefId")
+        )
+        if not brief_number:
+            raise ExpenseFlowError(
+                "missing_qbo_brief_number",
+                "Kolo did not return a QuickBooks approval brief number.",
+                details={"path": str(path)},
+            )
+        return {"brief_number": str(brief_number), "raw": result}
+
+    def quickbooks_write_status(self, brief_number):
+        result = self.runner(
+            ["kolo", "quickbooks", "write-status", "--brief-id", str(brief_number)]
+        )
+        if not isinstance(result, dict) or not result.get("status"):
+            raise ExpenseFlowError(
+                "invalid_qbo_write_status",
+                "Kolo returned an invalid QuickBooks approval status.",
+                details={"brief_number": str(brief_number)},
+            )
+        normalized = dict(result)
+        normalized["status"] = str(result["status"]).lower()
+        if "execution_result" not in normalized and "executionResult" in normalized:
+            normalized["execution_result"] = normalized["executionResult"]
+        return normalized
+
 
 def _run_command(command):
     completed = subprocess.run(command, check=False, capture_output=True, text=True)

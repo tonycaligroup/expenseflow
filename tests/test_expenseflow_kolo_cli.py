@@ -15,6 +15,32 @@ class ExpenseFlowKoloCliTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(export.call_args.args[1], "er_1")
 
+    def test_sync_qbo_passes_routing_and_retry_options(self):
+        args = SimpleNamespace(
+            report_id="er_1",
+            session_key="session_1",
+            chat_id="chat_1",
+            retry_terminal=True,
+        )
+
+        with patch.object(expenseflow_kolo_cli, "sync_approved_report_qbo", return_value={"ok": True}) as sync:
+            result = expenseflow_kolo_cli.cmd_sync_qbo(args, gateway=object())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(sync.call_args.args[1], "er_1")
+        self.assertEqual(sync.call_args.kwargs["session_key"], "session_1")
+        self.assertEqual(sync.call_args.kwargs["chat_id"], "chat_1")
+        self.assertTrue(sync.call_args.kwargs["retry_terminal"])
+
+    def test_refresh_qbo_passes_org_id(self):
+        args = SimpleNamespace(org_id="org_1")
+
+        with patch.object(expenseflow_kolo_cli, "refresh_qbo_reference_cache", return_value={"ok": True}) as refresh:
+            result = expenseflow_kolo_cli.cmd_refresh_qbo(args, gateway=object())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(refresh.call_args.args[1], "org_1")
+
     def test_decide_report_casts_approver_user_id_to_int(self):
         args = SimpleNamespace(
             approval_request_id="ar_1",

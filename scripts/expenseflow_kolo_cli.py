@@ -16,9 +16,11 @@ from expenseflow.kolo_workflows import (
     export_approved_report_csv,
     export_approved_report_sheets,
     map_sender_identity,
+    refresh_qbo_reference_cache,
     reconcile_user_directory,
     send_due_approval_reminders,
     submit_report_for_approval,
+    sync_approved_report_qbo,
     upsert_accounting_destination,
     upsert_approval_delegation,
     upsert_approval_policy,
@@ -183,6 +185,22 @@ def cmd_export_sheets(args, gateway):
     return _ok(result=export_approved_report_sheets(gateway, args.report_id))
 
 
+def cmd_refresh_qbo(args, gateway):
+    return _ok(result=refresh_qbo_reference_cache(gateway, args.org_id))
+
+
+def cmd_sync_qbo(args, gateway):
+    return _ok(
+        result=sync_approved_report_qbo(
+            gateway,
+            args.report_id,
+            session_key=args.session_key,
+            chat_id=args.chat_id,
+            retry_terminal=args.retry_terminal,
+        )
+    )
+
+
 def cmd_attach_receipt(args, gateway):
     return _ok(
         result=attach_receipt_reference(
@@ -308,6 +326,16 @@ def main(argv=None):
     cmd = sub.add_parser("export-sheets")
     cmd.add_argument("--report-id", required=True)
     cmd.set_defaults(func=cmd_export_sheets)
+
+    cmd = sub.add_parser("qbo-refresh-cache")
+    cmd.set_defaults(func=cmd_refresh_qbo)
+
+    cmd = sub.add_parser("sync-qbo")
+    cmd.add_argument("--report-id", required=True)
+    cmd.add_argument("--session-key")
+    cmd.add_argument("--chat-id")
+    cmd.add_argument("--retry-terminal", action="store_true")
+    cmd.set_defaults(func=cmd_sync_qbo)
 
     cmd = sub.add_parser("attach-receipt")
     cmd.add_argument("--expense-id", required=True)

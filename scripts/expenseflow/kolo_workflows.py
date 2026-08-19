@@ -9,6 +9,13 @@ from .expense_core import create_expense, detect_duplicates
 from .models import utc_now
 from .onboarding_engine import acknowledge_policy, approve_onboarding, create_delegation, create_discovered_profile
 from .receipt_engine import ALLOWED_RECEIPT_CONTENT_TYPES, normalize_receipt_attachment
+from .qbo_export import (
+    QBO_PAYMENT_TYPES,
+    QBO_TRANSACTION_TYPES,
+    build_qbo_transaction,
+    extract_qbo_entity,
+    normalize_qbo_reference_cache,
+)
 from .reminder_engine import (
     advance_reminder_schedule,
     format_utc,
@@ -48,6 +55,7 @@ IDENTITY_DISCOVERY = "skill.identity_discovery"
 NOTIFICATION_EVENT = "skill.notification_event"
 EXPORT_RUN = "skill.export_run"
 EXPORT_ITEM = "skill.export_item"
+ACCOUNTING_REFERENCE_CACHE = "skill.accounting_reference_cache"
 
 
 def upsert_user_profile(gateway, profile):
@@ -112,8 +120,8 @@ def _accounting_destination_payload(org_id, destination):
                 "Google Sheets fallback_to_csv must be true or false.",
             )
         config["fallback_to_csv"] = fallback_to_csv
-    elif destination_type == "qbo" and not config.get("company_id"):
-        raise ExpenseFlowError("missing_qbo_company_id", "QuickBooks destination requires company_id.")
+    elif destination_type == "qbo":
+        config = _normalize_qbo_destination_config(config)
     payload = {
         "org_id": org_id,
         "destination_type": destination_type,
@@ -122,6 +130,74 @@ def _accounting_destination_payload(org_id, destination):
         "schema_version": 1,
     }
     return payload
+
+
+def _normalize_qbo_destination_config(config):
+    config = dict(config)
+    realm_id = str(config.get("realm_id") or config.get("company_id") or "").strip()
+    if not realm_id:
+        raise ExpenseFlowError("missing_qbo_realm_id", "QuickBooks destination requires realm_id.")
+    transaction_type = str(config.get("transaction_type") or "").strip().lower()
+    if transaction_type not in QBO_TRANSACTION_TYPES:
+        raise ExpenseFlowError(
+            "invalid_qbo_transaction_type",
+            "QuickBooks transaction_type must be purchase, bill, or journalentry.",
+        )
+    category_account_ids = config.get("category_account_ids")
+    if not isinstance(category_account_ids, dict) or not category_account_ids:
+        raise ExpenseFlowError(
+            "missing_qbo_category_mappings",
+            "QuickBooks destination requires category_account_ids.",
+        )
+    normalized_mappings = {}
+    for category, account_id in category_account_ids.items():
+        category = str(category).strip()
+        account_id = str(account_id).strip()
+        if not category or not account_id:
+            raise ExpenseFlowError(
+                "invalid_qbo_category_mapping",
+                "QuickBooks category mappings require non-empty category and account IDs.",
+            )
+        normalized_mappings[category] = account_id
+    if transaction_type in {"purchase", "journalentry"} and not config.get("balancing_account_id"):
+        raise ExpenseFlowError(
+            "missing_qbo_account_mapping",
+            "QuickBooks purchase and journalentry destinations require balancing_account_id.",
+        )
+    if transaction_type == "purchase":
+        payment_type = str(config.get("payment_type") or "Cash")
+        if payment_type not in QBO_PAYMENT_TYPES:
+            raise ExpenseFlowError(
+                "invalid_qbo_payment_type",
+                "QuickBooks purchase payment_type must be Cash, Check, or CreditCard.",
+            )
+        config["payment_type"] = payment_type
+    employee_vendor_ids = config.get("employee_vendor_ids") or {}
+    if not isinstance(employee_vendor_ids, dict):
+        raise ExpenseFlowError(
+            "invalid_qbo_employee_vendor_mappings",
+            "QuickBooks employee_vendor_ids must be an object keyed by Kolo user ID.",
+        )
+    config.pop("company_id", None)
+    config["realm_id"] = realm_id
+    config["transaction_type"] = transaction_type
+    config["category_account_ids"] = normalized_mappings
+    config["employee_vendor_ids"] = {
+        str(user_id): str(vendor_id)
+        for user_id, vendor_id in employee_vendor_ids.items()
+        if str(user_id).strip() and str(vendor_id).strip()
+    }
+    for field in (
+        "balancing_account_id",
+        "accounts_payable_account_id",
+        "default_employee_vendor_id",
+        "default_class_id",
+        "default_tax_code_id",
+        "department_id",
+    ):
+        if config.get(field) is not None:
+            config[field] = str(config[field]).strip()
+    return config
 
 
 def upsert_approval_delegation(gateway, data, delegation_id=None, org_id="default"):
@@ -1265,6 +1341,373 @@ def _report_export_items(gateway, report_id):
         _payload(record)
         for record in gateway.list_records(EXPORT_ITEM)
         if _payload(record).get("report_id") == report_id
+    ]
+
+
+def refresh_qbo_reference_cache(gateway, org_id="default"):
+    destination = _active_qbo_destination(gateway, org_id)
+    config = destination["config"]
+    connection = _require_qbo_connection(gateway, config["realm_id"])
+    entities = ("Account", "Vendor", "Customer", "TaxCode", "Class", "Department", "Currency")
+    responses = {}
+    for entity in entities:
+        responses[entity] = gateway.quickbooks_call(
+            "query",
+            realm_id=config["realm_id"],
+            query={"query": f"select * from {entity} maxresults 100"},
+        )
+    cache = {
+        "org_id": str(org_id),
+        "realm_id": config["realm_id"],
+        "environment": connection.get("environment"),
+        "references": normalize_qbo_reference_cache(responses),
+        "cached_at": utc_now(),
+        "status": "active",
+        "schema_version": 1,
+    }
+    gateway.upsert_record(ACCOUNTING_REFERENCE_CACHE, org_id, cache, "active")
+    return cache
+
+
+def sync_approved_report_qbo(
+    gateway,
+    report_id,
+    session_key=None,
+    chat_id=None,
+    retry_terminal=False,
+):
+    report = _payload(gateway.get_record(EXPENSE_REPORT, report_id))
+    org_id = str(report.get("org_id") or "default")
+    destination = _active_qbo_destination(gateway, org_id)
+    config = destination["config"]
+    expenses = [_payload(gateway.get_record(EXPENSE, expense_id)) for expense_id in report.get("expense_ids", [])]
+    transaction = build_qbo_transaction(report, expenses, config)
+    runs = _qbo_runs(gateway, report_id, config["realm_id"])
+
+    completed = next((run for run in runs if run.get("status") == "complete"), None)
+    if completed is not None:
+        return {
+            "status": "already_synced",
+            "destination": "qbo",
+            "report": report,
+            "export_run": completed,
+            "items": _qbo_items_for_run(gateway, completed["export_run_id"]),
+        }
+    if report.get("status") == "synced" and not runs:
+        raise ExpenseFlowError(
+            "incomplete_qbo_sync_state",
+            "The report is synced but its QuickBooks run is missing.",
+            details={"report_id": report_id},
+        )
+
+    if runs:
+        latest = runs[-1]
+        if latest.get("payload_hash") != transaction["payload_hash"]:
+            raise ExpenseFlowError(
+                "qbo_payload_changed_after_claim",
+                "The approved QuickBooks payload changed after a sync claim was created.",
+                details={"export_run_id": latest.get("export_run_id")},
+            )
+        if latest.get("status") in {"rejected", "expired"} and retry_terminal:
+            attempt = int(latest.get("attempt", 1)) + 1
+            connection = _require_qbo_connection(gateway, config["realm_id"])
+            return _submit_qbo_sync(
+                gateway,
+                report,
+                expenses,
+                transaction,
+                config,
+                connection,
+                attempt,
+                session_key,
+                chat_id,
+            )
+        return _reconcile_qbo_sync(gateway, report, expenses, latest, transaction)
+
+    connection = _require_qbo_connection(gateway, config["realm_id"])
+    return _submit_qbo_sync(
+        gateway,
+        report,
+        expenses,
+        transaction,
+        config,
+        connection,
+        1,
+        session_key,
+        chat_id,
+    )
+
+
+def _submit_qbo_sync(
+    gateway,
+    report,
+    expenses,
+    transaction,
+    config,
+    connection,
+    attempt,
+    session_key,
+    chat_id,
+):
+    org_id = str(report.get("org_id") or "default")
+    run_id = f"qbo:{org_id}:{config['realm_id']}:{report['report_id']}:attempt:{attempt}"
+    run = {
+        "export_run_id": run_id,
+        "org_id": org_id,
+        "report_id": report["report_id"],
+        "destination_type": "qbo",
+        "realm_id": config["realm_id"],
+        "environment": connection.get("environment"),
+        "entity_type": transaction["entity_type"],
+        "path": transaction["path"],
+        "payload_hash": transaction["payload_hash"],
+        "request_id": transaction["request_id"],
+        "attempt": attempt,
+        "status": "claimed",
+        "claimed_at": utc_now(),
+        "schema_version": 1,
+    }
+    claimed = gateway.upsert_record(EXPORT_RUN, run_id, run, "claimed")
+    if not claimed.get("created", False):
+        raise ExpenseFlowError(
+            "qbo_sync_already_claimed",
+            "Another ExpenseFlow invocation claimed this QuickBooks sync.",
+            retryable=True,
+            details={"export_run_id": run_id},
+        )
+    for line_item in transaction["line_items"]:
+        _reserve_qbo_item(gateway, run, line_item)
+
+    try:
+        brief = gateway.quickbooks_write(
+            transaction["path"],
+            transaction["body"],
+            realm_id=config["realm_id"],
+            request_id=transaction["request_id"],
+            reason=f"Sync approved ExpenseFlow report {report['report_id']} as {transaction['entity_type']}",
+            session_key=session_key,
+            chat_id=chat_id,
+        )
+    except ExpenseFlowError as exc:
+        failed_run = dict(run)
+        failed_run["status"] = "unknown"
+        failed_run["error_code"] = exc.code
+        failed_run["completed_at"] = utc_now()
+        gateway.upsert_record(EXPORT_RUN, run_id, failed_run, "unknown")
+        for item in _qbo_items_for_run(gateway, run_id):
+            item = dict(item)
+            item["status"] = "unknown"
+            item["error_code"] = exc.code
+            gateway.upsert_record(EXPORT_ITEM, item["export_item_id"], item, "unknown")
+        raise
+
+    pending_run = dict(run)
+    pending_run.update(
+        {
+            "status": "approval_pending",
+            "brief_number": brief["brief_number"],
+            "brief_created_at": utc_now(),
+        }
+    )
+    gateway.upsert_record(EXPORT_RUN, run_id, pending_run, "approval_pending")
+    return {
+        "status": "approval_pending",
+        "destination": "qbo",
+        "brief_number": brief["brief_number"],
+        "report": report,
+        "export_run": pending_run,
+        "items": _qbo_items_for_run(gateway, run_id),
+    }
+
+
+def _reconcile_qbo_sync(gateway, report, expenses, run, transaction):
+    if not run.get("brief_number"):
+        raise ExpenseFlowError(
+            "qbo_sync_incomplete",
+            "A prior QuickBooks sync claim has no approval brief. It was not submitted again.",
+            details={"export_run_id": run.get("export_run_id"), "status": run.get("status")},
+        )
+    if run.get("status") in {"rejected", "failed", "expired"}:
+        return {
+            "status": run["status"],
+            "destination": "qbo",
+            "report": report,
+            "export_run": run,
+            "items": _qbo_items_for_run(gateway, run["export_run_id"]),
+        }
+
+    brief = gateway.quickbooks_write_status(run["brief_number"])
+    brief_status = str(brief.get("status") or "").lower()
+    if brief_status not in {"pending", "approved", "executed", "rejected", "failed", "expired"}:
+        raise ExpenseFlowError(
+            "invalid_qbo_write_status",
+            "Kolo returned an unknown QuickBooks approval status.",
+            details={"brief_number": run["brief_number"], "status": brief_status},
+        )
+    if brief_status in {"rejected", "failed", "expired"}:
+        terminal_run = dict(run)
+        terminal_run["status"] = brief_status
+        terminal_run["completed_at"] = utc_now()
+        gateway.upsert_record(EXPORT_RUN, run["export_run_id"], terminal_run, brief_status)
+        for item in _qbo_items_for_run(gateway, run["export_run_id"]):
+            item = dict(item)
+            item["status"] = brief_status
+            item["completed_at"] = utc_now()
+            gateway.upsert_record(EXPORT_ITEM, item["export_item_id"], item, brief_status)
+        return {
+            "status": brief_status,
+            "destination": "qbo",
+            "report": report,
+            "export_run": terminal_run,
+            "items": _qbo_items_for_run(gateway, run["export_run_id"]),
+        }
+    if brief_status != "executed" or brief.get("execution_result") is None:
+        pending_run = dict(run)
+        pending_run["status"] = "executing" if brief_status == "executed" else "approval_pending"
+        pending_run["last_checked_at"] = utc_now()
+        gateway.upsert_record(EXPORT_RUN, run["export_run_id"], pending_run, pending_run["status"])
+        return {
+            "status": "execution_pending" if brief_status == "executed" else "approval_pending",
+            "destination": "qbo",
+            "report": report,
+            "export_run": pending_run,
+            "items": _qbo_items_for_run(gateway, run["export_run_id"]),
+        }
+
+    entity = extract_qbo_entity(brief["execution_result"], transaction["entity_type"])
+    return _complete_qbo_sync(gateway, report, expenses, run, entity)
+
+
+def _complete_qbo_sync(gateway, report, expenses, run, entity):
+    synced_report = report if report.get("status") == "synced" else transition_report(report, "synced")
+    if report.get("status") != "synced":
+        gateway.upsert_record(EXPENSE_REPORT, report["report_id"], synced_report, "synced")
+    for expense in expenses:
+        if expense.get("status") != "synced":
+            synced_expense = _transition_expense(expense, "synced")
+            gateway.upsert_record(EXPENSE, synced_expense["expense_id"], synced_expense, "synced")
+    confirmed_items = []
+    for item in _qbo_items_for_run(gateway, run["export_run_id"]):
+        item = dict(item)
+        item.update(
+            {
+                "status": "confirmed",
+                "qbo_entity_type": entity["entity_type"],
+                "qbo_entity_id": entity["entity_id"],
+                "qbo_sync_token": entity.get("sync_token"),
+                "confirmed_at": utc_now(),
+            }
+        )
+        gateway.upsert_record(EXPORT_ITEM, item["export_item_id"], item, "confirmed")
+        confirmed_items.append(item)
+    completed_run = dict(run)
+    completed_run.update(
+        {
+            "status": "complete",
+            "qbo_entity_type": entity["entity_type"],
+            "qbo_entity_id": entity["entity_id"],
+            "qbo_sync_token": entity.get("sync_token"),
+            "confirmed_item_count": len(confirmed_items),
+            "completed_at": utc_now(),
+        }
+    )
+    gateway.upsert_record(EXPORT_RUN, run["export_run_id"], completed_run, "complete")
+    gateway.log_action(
+        "skill.expense_report",
+        "Expense report synced to QuickBooks Online",
+        f"expenseflow:sync-qbo:{report['report_id']}:{run['realm_id']}",
+        {
+            "report_id": report["report_id"],
+            "realm_id": run["realm_id"],
+            "qbo_entity_type": entity["entity_type"],
+            "qbo_entity_id": entity["entity_id"],
+        },
+    )
+    return {
+        "status": "ok",
+        "destination": "qbo",
+        "report": synced_report,
+        "export_run": completed_run,
+        "items": confirmed_items,
+    }
+
+
+def _reserve_qbo_item(gateway, run, line_item):
+    item_id = f"{run['export_run_id']}:{line_item['expense_id']}"
+    item = {
+        "export_item_id": item_id,
+        "export_run_id": run["export_run_id"],
+        "org_id": run["org_id"],
+        "report_id": run["report_id"],
+        "expense_id": line_item["expense_id"],
+        "destination_type": "qbo",
+        "realm_id": run["realm_id"],
+        "entity_type": run["entity_type"],
+        "line_index": line_item["line_index"],
+        "content_hash": line_item["content_hash"],
+        "status": "reserved",
+        "reserved_at": utc_now(),
+        "schema_version": 1,
+    }
+    claimed = gateway.upsert_record(EXPORT_ITEM, item_id, item, "reserved")
+    if not claimed.get("created", False):
+        raise ExpenseFlowError(
+            "export_item_claim_conflict",
+            "Another invocation reserved a QuickBooks expense line.",
+            retryable=True,
+            details={"export_item_id": item_id},
+        )
+    return item
+
+
+def _active_qbo_destination(gateway, org_id):
+    destination = _payload(gateway.get_record(ACCOUNTING_DESTINATION, org_id))
+    if destination.get("status") != "active" or destination.get("destination_type") != "qbo":
+        raise ExpenseFlowError(
+            "qbo_destination_not_active",
+            "The organization does not have an active QuickBooks destination.",
+        )
+    return destination
+
+
+def _require_qbo_connection(gateway, realm_id):
+    status = gateway.quickbooks_status()
+    if not status.get("connected"):
+        raise ExpenseFlowError("qbo_not_connected", "QuickBooks Online is not connected in Kolo.")
+    realms = status.get("realms") or []
+    realm = next((item for item in realms if str(item.get("realm_id")) == str(realm_id)), None)
+    if realm is None:
+        raise ExpenseFlowError(
+            "qbo_realm_not_connected",
+            "The configured QuickBooks realm is not connected in Kolo.",
+            details={"realm_id": str(realm_id)},
+        )
+    if realm.get("needs_reconnect"):
+        raise ExpenseFlowError(
+            "qbo_reconnect_required",
+            "The configured QuickBooks realm must be reconnected before syncing.",
+            details={"realm_id": str(realm_id)},
+        )
+    return {**realm, "environment": status.get("environment")}
+
+
+def _qbo_runs(gateway, report_id, realm_id):
+    runs = [
+        _payload(record)
+        for record in gateway.list_records(EXPORT_RUN)
+        if _payload(record).get("destination_type") == "qbo"
+        and _payload(record).get("report_id") == report_id
+        and str(_payload(record).get("realm_id")) == str(realm_id)
+    ]
+    runs.sort(key=lambda run: int(run.get("attempt", 1)))
+    return runs
+
+
+def _qbo_items_for_run(gateway, run_id):
+    return [
+        _payload(record)
+        for record in gateway.list_records(EXPORT_ITEM)
+        if _payload(record).get("export_run_id") == run_id
     ]
 
 

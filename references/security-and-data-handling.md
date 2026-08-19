@@ -54,6 +54,14 @@ credentials, tax identities, or banking information.
 - Preview accounting payloads before posting. QuickBooks writes require the
   platform's approval-gated write path.
 - Record external transaction IDs and block duplicate posting.
+- Create a governed QuickBooks claim before opening an approval brief. Never
+  resubmit a claim whose brief creation or execution outcome is unknown.
+- Treat `executed` with a null result as still in progress. Mark records
+  `synced` only after the result contains the expected QBO entity ID.
+- Require explicit realm, transaction type, category-account, balancing-account,
+  and employee-vendor mappings as applicable. Never let an LLM choose accounts.
+- Cache only allowlisted QBO reference fields; do not persist email, address,
+  tax identifier, bank, or credential fields from vendor/customer responses.
 
 ## Directory Reconciliation
 

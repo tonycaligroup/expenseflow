@@ -104,6 +104,7 @@ Core record types:
 - `skill.notification_event`
 - `skill.export_run`
 - `skill.export_item`
+- `skill.accounting_reference_cache`
 
 Use UTC ISO-8601 timestamps for instants. Store date-only business fields, such as expense date and due date, separately.
 
@@ -116,7 +117,8 @@ When an admin sets up ExpenseFlow:
 3. Configure default and fallback approvers in `skill.approval_policy`.
 4. Configure department routing in `skill.department_policy` if needed.
 5. Configure export destination in `skill.accounting_destination`: CSV, Google Sheets, Google Drive/Gmail, or QuickBooks Online.
-6. If QBO is selected, run `kolo quickbooks status` and fetch accounts/vendors with `kolo quickbooks call`.
+6. If QBO is selected, connect the realm, configure its explicit transaction
+   type and account mappings, then run `qbo-refresh-cache`.
 7. Configure categories and receipt thresholds.
 8. Create `skill.user_profile` records for employees.
 9. Send policy acknowledgement messages with `kolo contact-agent`.
@@ -378,16 +380,40 @@ PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py \
 The verified platform behavior and remaining concurrency limitation are in
 [google-sheets-platform-verification.md](references/google-sheets-platform-verification.md).
 
-QBO sync requires:
+QBO destinations must pin `realm_id`, explicitly select `transaction_type` as
+`purchase`, `bill`, or `journalentry`, and provide `category_account_ids`.
+Purchase and JournalEntry also require `balancing_account_id`. Bill requires an
+`employee_vendor_ids` mapping or `default_employee_vendor_id`. Never infer an
+accounting treatment or create accounts/vendors automatically.
 
-1. `kolo quickbooks status`.
-2. QBO account/vendor cache.
-3. Category-to-account mapping.
-4. Deterministic Bill or JournalEntry payload generation.
-5. Approval-gated `kolo quickbooks write`.
-6. Confirmed write completion before marking records `synced`.
+Refresh the bounded, allowlisted account/vendor/reference cache with:
 
-If QBO receipt attachment upload is unsupported, include receipt references in transaction notes.
+```bash
+PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py \
+  --org-id <org_id> qbo-refresh-cache
+```
+
+Start or reconcile an approved report sync with:
+
+```bash
+PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py \
+  --org-id <org_id> sync-qbo --report-id <report_id> \
+  --session-key <kolo_session_key>
+```
+
+The first call creates a permanent governed claim and opens Kolo's human
+approval brief. Later calls poll `kolo quickbooks write-status`; only
+`executed` with a non-null result containing the QBO entity ID moves the report
+and expenses to `synced`. Do not repeat a claim with no stored brief number or
+an unknown/failed result. A rejected or expired brief may create a new attempt
+only with the explicit `--retry-terminal` flag.
+
+Reports must contain one currency per QBO transaction. The adapter stores QBO
+entity ID and SyncToken when returned. Current Kolo write help exposes JSON
+bodies only, so include safe receipt object references in `PrivateNote`; do not
+attempt multipart receipt upload. See
+[qbo-platform-verification.md](references/qbo-platform-verification.md) for the
+verified command contract and remaining live-test requirements.
 
 ## Error Handling
 

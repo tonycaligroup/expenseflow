@@ -8,7 +8,7 @@ from .errors import ExpenseFlowError
 class FakeKoloGateway:
     """Governed-record and messaging test double for Kolo workflows."""
 
-    def __init__(self, peers=None, spreadsheets=None):
+    def __init__(self, peers=None, spreadsheets=None, qbo_status=None, qbo_reads=None):
         self.records = {}
         self.messages = []
         self.tasks = []
@@ -18,6 +18,18 @@ class FakeKoloGateway:
         self.spreadsheets = deepcopy(spreadsheets or {})
         self.sheet_operations = []
         self.sheet_failures = {}
+        self.qbo_connection = deepcopy(
+            qbo_status
+            or {
+                "connected": False,
+                "environment": "production",
+                "realms": [],
+            }
+        )
+        self.qbo_reads = deepcopy(qbo_reads or {})
+        self.qbo_operations = []
+        self.qbo_write_statuses = {}
+        self.qbo_failures = {}
 
     def upsert_record(self, record_type, external_id, payload, status="active", schema_version=1):
         key = (record_type, str(external_id))
@@ -221,6 +233,87 @@ class FakeKoloGateway:
         )
         return response
 
+    def queue_qbo_failure(self, operation, error):
+        self.qbo_failures.setdefault(operation, []).append(error)
+
+    def quickbooks_status(self):
+        self._raise_qbo_failure("status")
+        self.qbo_operations.append({"operation": "status"})
+        return deepcopy(self.qbo_connection)
+
+    def quickbooks_call(self, path, realm_id=None, query=None, api="accounting"):
+        self._raise_qbo_failure("call")
+        operation = {
+            "operation": "call",
+            "path": str(path),
+            "realm_id": None if realm_id is None else str(realm_id),
+            "query": deepcopy(query or {}),
+            "api": api,
+        }
+        self.qbo_operations.append(operation)
+        query_text = str((query or {}).get("query") or "")
+        entity = next(
+            (name for name in self.qbo_reads if f"from {name}".lower() in query_text.lower()),
+            None,
+        )
+        return deepcopy(self.qbo_reads.get(entity, {"QueryResponse": {}}))
+
+    def quickbooks_write(
+        self,
+        path,
+        body,
+        realm_id=None,
+        request_id=None,
+        reason=None,
+        session_key=None,
+        chat_id=None,
+        api="accounting",
+        http_method="post",
+        query=None,
+    ):
+        self._raise_qbo_failure("write")
+        brief_number = f"brief_{len([op for op in self.qbo_operations if op['operation'] == 'write']) + 1}"
+        self.qbo_operations.append(
+            {
+                "operation": "write",
+                "path": str(path),
+                "body": deepcopy(body),
+                "realm_id": None if realm_id is None else str(realm_id),
+                "request_id": request_id,
+                "reason": reason,
+                "session_key": session_key,
+                "chat_id": chat_id,
+                "api": api,
+                "http_method": http_method,
+                "query": deepcopy(query or {}),
+                "brief_number": brief_number,
+            }
+        )
+        self.qbo_write_statuses.setdefault(
+            brief_number,
+            {"status": "pending", "brief_number": brief_number, "execution_result": None},
+        )
+        return {"brief_number": brief_number}
+
+    def quickbooks_write_status(self, brief_number):
+        self._raise_qbo_failure("write_status")
+        brief_number = str(brief_number)
+        self.qbo_operations.append({"operation": "write_status", "brief_number": brief_number})
+        if brief_number not in self.qbo_write_statuses:
+            raise ExpenseFlowError(
+                "qbo_unknown_brief",
+                "No fake QuickBooks approval brief exists.",
+                details={"brief_number": brief_number},
+            )
+        return deepcopy(self.qbo_write_statuses[brief_number])
+
+    def set_qbo_write_status(self, brief_number, status, execution_result=None):
+        self.qbo_write_statuses[str(brief_number)] = {
+            "status": status,
+            "brief_number": str(brief_number),
+            "execution_result": deepcopy(execution_result),
+        }
+
     def _spreadsheet(self, spreadsheet_id):
         try:
             return self.spreadsheets[str(spreadsheet_id)]
@@ -245,6 +338,14 @@ class FakeKoloGateway:
             if isinstance(error, Exception):
                 raise error
             raise AssertionError("Queued sheet failure must be an exception.")
+
+    def _raise_qbo_failure(self, operation):
+        failures = self.qbo_failures.get(operation) or []
+        if failures:
+            error = failures.pop(0)
+            if isinstance(error, Exception):
+                raise error
+            raise AssertionError("Queued QuickBooks failure must be an exception.")
 
 
 _A1_RE = re.compile(
