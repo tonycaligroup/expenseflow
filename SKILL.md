@@ -54,6 +54,7 @@ Use `scripts/expenseflow_kolo_cli.py` for Kolo runtime flows:
 - `upsert-delegation`
 - `configure-org`
 - `reconcile-users`
+- `setup-readiness`
 - `capture-expense`
 - `capture-with-discovery`
 - `map-sender`
@@ -122,7 +123,14 @@ When an admin sets up ExpenseFlow:
 7. Configure categories and receipt thresholds.
 8. Create `skill.user_profile` records for employees.
 9. Send policy acknowledgement messages with `kolo contact-agent`.
-10. Log setup completion with `kolo log-action`.
+10. Run `setup-readiness` and resolve every blocker before starting a pilot.
+11. Log setup completion with `kolo log-action`.
+
+`setup-readiness` is deterministic and read-only. It returns `not_ready`,
+`ready_with_warnings`, or `ready`, plus the first next action and all checks.
+For Sheets and QBO it verifies the configured connection without exporting an
+expense. Use `--skip-integration-check` only for diagnosis; a skipped external
+check remains a warning. Treat `can_launch_pilot: false` as a hard stop.
 
 Approval reminders are disabled by default. To enable them, configure
 `approval_reminders.enabled`, `initial_delay_hours`, `interval_hours`,

@@ -36,6 +36,7 @@ from .sheets_export import (
     parse_updated_range,
     row_range,
 )
+from .setup_readiness import evaluate_setup_readiness
 from .status import validate_transition
 
 
@@ -252,6 +253,80 @@ def configure_organization(gateway, org_id, settings, approval_policy, destinati
             destination_payload["status"],
         ),
     }
+
+
+def organization_setup_readiness(gateway, org_id="default", verify_destination=True):
+    settings = _optional_payload(gateway, EXPENSE_SETTINGS, org_id, default={})
+    approval_policy = _optional_payload(gateway, APPROVAL_POLICY, org_id, default={})
+    destination = _optional_payload(gateway, ACCOUNTING_DESTINATION, org_id, default={})
+    profiles = [
+        profile
+        for profile in (_payload(record) for record in gateway.list_records(USER_PROFILE))
+        if str(profile.get("org_id", org_id)) == str(org_id)
+    ]
+    department_policies = {}
+    for record in gateway.list_records(DEPARTMENT_POLICY, status="active"):
+        policy = _payload(record)
+        if str(policy.get("org_id", org_id)) == str(org_id):
+            department_policies[policy.get("department", record["external_id"])] = policy
+    approval_delegations = [
+        delegation
+        for delegation in (_payload(record) for record in gateway.list_records(APPROVAL_DELEGATION, status="active"))
+        if str(delegation.get("org_id", org_id)) == str(org_id)
+    ]
+    try:
+        peers = [peer for peer in gateway.list_peers() if _peer_in_org(peer, org_id)]
+        directory_error = None
+    except ExpenseFlowError as exc:
+        peers = []
+        directory_error = exc.code
+    return evaluate_setup_readiness(
+        org_id,
+        settings=settings,
+        approval_policy=approval_policy,
+        destination=destination,
+        profiles=profiles,
+        department_policies=department_policies,
+        approval_delegations=approval_delegations,
+        peers=peers,
+        destination_health=_check_destination_health(gateway, destination, verify_destination),
+        directory_error=directory_error,
+    )
+
+
+def _check_destination_health(gateway, destination, verify_destination):
+    if not verify_destination or destination.get("status") != "active":
+        return None
+    destination_type = destination.get("destination_type")
+    config = destination.get("config") or {}
+    if destination_type == "csv":
+        return None
+    try:
+        if destination_type == "sheets":
+            metadata = gateway.sheets_get_metadata(config.get("spreadsheet_id"))
+            _, sheet_name = _resolve_sheet(metadata, config)
+            response = gateway.sheets_read_values(config.get("spreadsheet_id"), header_range(sheet_name))
+            rows = normalized_values(response, len(SHEET_COLUMNS))
+            if rows and any(rows[0]) and rows[0] != SHEET_COLUMNS:
+                raise ExpenseFlowError(
+                    "sheets_header_mismatch",
+                    "The configured sheet does not have the ExpenseFlow column layout.",
+                )
+            return {"status": "pass"}
+        if destination_type == "qbo":
+            _require_qbo_connection(gateway, config.get("realm_id"))
+            return {"status": "pass"}
+        return {
+            "status": "error",
+            "error_code": "invalid_accounting_destination",
+            "next_action": "Choose CSV, Google Sheets, or QuickBooks Online.",
+        }
+    except ExpenseFlowError as exc:
+        return {
+            "status": "error",
+            "error_code": exc.code,
+            "next_action": exc.message,
+        }
 
 
 def reconcile_user_directory(gateway, org_id="default", deactivate_missing=False):

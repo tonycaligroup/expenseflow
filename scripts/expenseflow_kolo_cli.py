@@ -16,6 +16,7 @@ from expenseflow.kolo_workflows import (
     export_approved_report_csv,
     export_approved_report_sheets,
     map_sender_identity,
+    organization_setup_readiness,
     refresh_qbo_reference_cache,
     reconcile_user_directory,
     send_due_approval_reminders,
@@ -87,6 +88,16 @@ def cmd_configure_org(args, gateway):
 
 def cmd_reconcile_users(args, gateway):
     return _ok(result=reconcile_user_directory(gateway, args.org_id, args.deactivate_missing))
+
+
+def cmd_setup_readiness(args, gateway):
+    return _ok(
+        result=organization_setup_readiness(
+            gateway,
+            args.org_id,
+            verify_destination=not args.skip_integration_check,
+        )
+    )
 
 
 def cmd_capture_expense(args, gateway):
@@ -270,6 +281,10 @@ def main(argv=None):
     cmd = sub.add_parser("reconcile-users")
     cmd.add_argument("--deactivate-missing", action="store_true")
     cmd.set_defaults(func=cmd_reconcile_users)
+
+    cmd = sub.add_parser("setup-readiness")
+    cmd.add_argument("--skip-integration-check", action="store_true")
+    cmd.set_defaults(func=cmd_setup_readiness)
 
     cmd = sub.add_parser("capture-expense")
     cmd.add_argument("--submitter-user-id", required=True)

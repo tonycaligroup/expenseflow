@@ -41,6 +41,20 @@ class ExpenseFlowKoloCliTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(refresh.call_args.args[1], "org_1")
 
+    def test_setup_readiness_passes_org_and_integration_choice(self):
+        args = SimpleNamespace(org_id="org_1", skip_integration_check=True)
+        gateway = object()
+
+        with patch.object(
+            expenseflow_kolo_cli,
+            "organization_setup_readiness",
+            return_value={"status": "ready_with_warnings"},
+        ) as readiness:
+            result = expenseflow_kolo_cli.cmd_setup_readiness(args, gateway=gateway)
+
+        self.assertEqual(result["status"], "ok")
+        readiness.assert_called_once_with(gateway, "org_1", verify_destination=False)
+
     def test_decide_report_casts_approver_user_id_to_int(self):
         args = SimpleNamespace(
             approval_request_id="ar_1",
