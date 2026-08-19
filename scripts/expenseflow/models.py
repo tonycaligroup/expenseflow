@@ -26,6 +26,7 @@ EXPENSE_STATUSES = {
 
 REPORT_STATUSES = {
     "draft",
+    "held_pending_manager",
     "pending_approval",
     "partially_approved",
     "approved",
@@ -46,7 +47,8 @@ EXPENSE_TRANSITIONS = {
 }
 
 REPORT_TRANSITIONS = {
-    "draft": {"pending_approval", "rejected"},
+    "draft": {"held_pending_manager", "pending_approval", "rejected"},
+    "held_pending_manager": {"pending_approval", "rejected"},
     "pending_approval": {"partially_approved", "approved", "rejected"},
     "partially_approved": {"approved", "rejected", "exported"},
     "approved": {"exported", "synced"},

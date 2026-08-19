@@ -4,6 +4,7 @@ import json
 import sys
 
 from expenseflow.errors import ExpenseFlowError
+from expenseflow.csv_export import generate_report_csv
 from expenseflow.expense_core import create_expense, detect_duplicates, validate_expense
 from expenseflow.report_engine import create_report
 
@@ -55,6 +56,10 @@ def cmd_create_report(args):
     )
 
 
+def cmd_export_csv(args):
+    return _ok(csv=generate_report_csv(_load_json(args.report), _load_json(args.expenses)))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ExpenseFlow deterministic core CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -83,6 +88,11 @@ def main(argv=None):
     cmd.add_argument("--period")
     cmd.add_argument("--report-id")
     cmd.set_defaults(func=cmd_create_report)
+
+    cmd = sub.add_parser("export-csv")
+    cmd.add_argument("--report", required=True)
+    cmd.add_argument("--expenses", required=True)
+    cmd.set_defaults(func=cmd_export_csv)
 
     args = parser.parse_args(argv)
     try:
