@@ -203,6 +203,28 @@ class KoloWorkflowTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "unverified_submitter")
         self.assertEqual(gateway.list_records(EXPENSE), [])
 
+    def test_reconciled_discovered_user_triggers_admin_on_first_expense(self):
+        gateway = FakeKoloGateway(peers=[{"user_id": 7, "display_name": "New Employee", "org_id": "default"}])
+        upsert_expense_settings(gateway, "default", {"expense_admin_user_ids": [99]})
+        reconcile_user_directory(gateway)
+
+        result = capture_expense_with_discovery(
+            gateway,
+            {
+                "vendor": "Office Depot",
+                "date": "2026-08-18",
+                "amount": "12.00",
+                "currency": "USD",
+                "category": "Office Supplies",
+            },
+            7,
+            expense_id="exp_reconciled",
+        )
+
+        self.assertTrue(result["onboarding_required"])
+        self.assertEqual(gateway.get_record(USER_PROFILE, 7)["status"], "pending_admin_approval")
+        self.assertEqual(gateway.messages[0]["target_user_id"], 99)
+
     def test_admin_approval_and_policy_ack_release_held_expense_to_draft(self):
         gateway = FakeKoloGateway(peers=[{"user_id": 7, "display_name": "New Employee", "org_id": "default"}])
         upsert_expense_settings(gateway, "default", {"expense_admin_user_ids": [99]})

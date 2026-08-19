@@ -206,7 +206,6 @@ def capture_expense_with_discovery(
             return _hold_for_identity_mapping(gateway, expense_data, settings, sender_id, org_id, expense_id)
         submitter_user_id = matches[0]["user_id"]
     submitter = _optional_payload(gateway, USER_PROFILE, submitter_user_id)
-    discovered = False
     if submitter is None:
         peer = _find_peer(gateway.list_peers(), submitter_user_id, org_id)
         if peer is None:
@@ -237,7 +236,12 @@ def capture_expense_with_discovery(
             status="pending_admin_approval",
         )
         upsert_user_profile(gateway, submitter)
-        discovered = True
+    elif submitter.get("status") == "discovered":
+        submitter = dict(submitter)
+        submitter["status"] = "pending_admin_approval"
+        if sender_id and not submitter.get("sender_id"):
+            submitter["sender_id"] = sender_id
+        upsert_user_profile(gateway, submitter)
 
     expense = capture_expense(
         gateway,
@@ -247,7 +251,8 @@ def capture_expense_with_discovery(
         expense_id=expense_id,
     )
     queue_ids = []
-    if discovered:
+    needs_admin_review = submitter.get("status") == "pending_admin_approval"
+    if needs_admin_review:
         queue_ids = _notify_admins(
             gateway,
             settings,
@@ -261,10 +266,10 @@ def capture_expense_with_discovery(
             excluded_user_id=submitter_user_id,
         )
     return {
-        "status": "held_pending_onboarding" if discovered else expense["status"],
+        "status": expense["status"],
         "expense": expense,
         "user_profile": submitter,
-        "onboarding_required": discovered,
+        "onboarding_required": expense["status"] == "held_pending_onboarding",
         "admin_notification_queue_ids": queue_ids,
     }
 
