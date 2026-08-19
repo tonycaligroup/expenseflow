@@ -72,11 +72,13 @@ receipt round trip against commit `d3fe325`.
   visibility task and is idempotent for an already completed task.
 
 The first live upload identified a reference-format incompatibility after the
-object had already been uploaded. A direct diagnostic `kolo file-upload` call
-created one additional synthetic object because uploads are not natively
-idempotent. The regression fix persists the upload response before validation,
-supports both reference formats, and can finalize a persisted `uploaded` or
-`upload_invalid` reservation without uploading the file again.
+object had already been uploaded. The old code did not persist that successful
+upload response before validation, so its object ID was not retained. A later
+direct diagnostic `kolo file-upload` call created one additional synthetic
+object because uploads are not natively idempotent. The regression fix persists
+the upload response before validation, supports both reference formats, and can
+finalize a persisted `uploaded` or `upload_invalid` reservation without
+uploading the file again.
 
 ## Live Receipt Regression Result
 
@@ -96,7 +98,9 @@ Kolo retested commit `0c7b8f0` with a fresh synthetic draft expense. Result:
 - Kolo soft-deleted the fresh synthetic expense and receipt records after
   collecting evidence. Object-store deletion was not attempted.
 
-The earlier diagnostic direct upload created object
-`01a01add-bd70-7d43-ad41-cadbfb9be44c`. The successful regression run created
-one separate object as expected; its repeated ExpenseFlow call did not create a
-third object.
+The failed pre-fix ExpenseFlow call created an object whose ID was lost by the
+old error path. The later diagnostic direct upload created object
+`01a01add-bd70-7d43-ad41-cadbfb9be44c`, and the successful regression run
+created `01a01ae2-e902-7d72-901a-afe12d75d46c`. Those three synthetic objects
+may remain in object storage because no documented safe object-delete command
+was available. The repeated ExpenseFlow call created no additional object.
