@@ -76,7 +76,7 @@ def cmd_decide_report(args, gateway):
         result=decide_report_approval(
             gateway,
             args.approval_request_id,
-            args.approver_user_id,
+            int(args.approver_user_id),
             args.decision,
             note=args.note,
             decision_id=args.decision_id,
