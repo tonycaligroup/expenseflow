@@ -60,7 +60,11 @@ The pilot also led to two preventive improvements:
 
 ## Remaining Scope
 
-This pilot verifies the Kolo-native CSV workflow. It does not yet verify receipt
-attachment ingestion, scheduled approval reminders, Google Sheets delivery,
-QuickBooks mapping or writes, reimbursement payment, card feeds, or production
-operations at scale.
+This pilot verifies the Kolo-native CSV workflow. A separate controlled test now
+verifies Google Sheets delivery, readback confirmation, duplicate prevention,
+formula safety, and cleanup; see
+`references/google-sheets-platform-verification.md`.
+
+Remaining live scope includes receipt attachment ingestion, scheduled approval
+reminders, QuickBooks mapping and writes, reimbursement payment, card feeds,
+high-volume Sheets performance, and production operations at scale.

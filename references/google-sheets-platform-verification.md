@@ -1,9 +1,10 @@
 # Google Sheets Platform Verification
 
-Kolo reviewed the ExpenseFlow Google Sheets plan on 2026-08-19. The review was
-read-only: it inspected the authenticated integration, spreadsheet metadata,
-range reads, API documentation, CLI capabilities, and failure shapes. It did
-not create, edit, or delete a spreadsheet.
+Kolo reviewed the ExpenseFlow Google Sheets plan on 2026-08-19, then ran a
+controlled live test against a temporary spreadsheet. The review inspected the
+authenticated integration, spreadsheet metadata, range reads, API
+documentation, CLI capabilities, and failure shapes. The live test exercised
+the write, readback, duplicate-prevention, formula-safety, and cleanup paths.
 
 ## Verified Connection
 
@@ -17,21 +18,19 @@ not create, edit, or delete a spreadsheet.
   response shapes.
 - The Maton route, not `gws`, is authoritative for the verified account.
 
-## Expected Write Surface
+## Verified Write Surface
 
-Kolo confirmed the standard v4 route shapes through the Maton integration, but
-the read-only review did not execute them. They remain partially verified until
-the controlled live test succeeds:
+Kolo confirmed the standard v4 route shapes through the Maton integration:
 
 - Append: `POST /spreadsheets/{id}/values/{range}:append`
 - Deterministic range update: `PUT /spreadsheets/{id}/values/{range}`
 - Batch value update: `POST /spreadsheets/{id}/values:batchUpdate`
 - Structural update: `POST /spreadsheets/{id}:batchUpdate`
 
-An append response should contain `spreadsheetId`, `tableRange`, and
-`updates.updatedRange`. ExpenseFlow parses `updatedRange`, stores the resulting
-row and range as hints, and confirms the complete row with a readback before it
-changes internal expense state.
+The controlled test executed the deterministic header update and value append.
+The append response supplied `updates.updatedRange`; ExpenseFlow parsed it,
+stored the resulting row and range as hints, and confirmed the complete row
+with a readback before changing internal expense state.
 
 Native append idempotency and conditional writes are not available. The
 `developerMetadata` endpoint also appeared unavailable through the verified
@@ -79,19 +78,29 @@ duplicate. It does not provide automatic recovery when a process dies after
 claiming an export but before writing a row. A verified conditional-write or
 lease primitive is the platform improvement needed for safe automatic takeover.
 
-## Live Test Still Required
+## Controlled Live Test
 
-The smallest controlled live test should use a temporary spreadsheet and
-synthetic expense only:
+The controlled live test passed on 2026-08-19 using one temporary spreadsheet,
+one synthetic organization, one synthetic report, and one synthetic expense.
+No real users, vendors, receipts, approvers, accounting data, messages, tasks,
+or uploads were used.
 
-1. Create or select a temporary spreadsheet and record its spreadsheet ID, tab
-   title, and immutable sheet ID.
-2. Configure a temporary ExpenseFlow organization destination.
-3. Export one approved synthetic expense.
-4. Verify headers, one row, `expenseflow_row_id`, stored `updatedRange`, and
-   readback confirmation.
-5. Invoke the same export again and verify no second row is appended.
-6. Remove the temporary governed records and spreadsheet after evidence is
-   collected.
+1. The first export wrote the exact 15-column header and one expense row.
+2. The deterministic `expenseflow_row_id`, stored write range, `export_item`
+   state `confirmed`, and `export_run` state `complete` were verified.
+3. The report and expense moved from `approved` to `exported` only after the
+   row readback succeeded.
+4. A vendor value beginning with `=SUM(A1:A10)` remained literal text, proving
+   that `RAW` writes prevented formula execution.
+5. Repeating the same export returned `already_exported`; the sheet still
+   contained exactly one matching expense row.
+6. Governed payloads contained no integration credentials or local filesystem
+   paths.
+7. The temporary spreadsheet was permanently deleted and its absence confirmed
+   with a subsequent `404` response.
+8. The five synthetic governed records were soft-deleted. Kolo's audit history
+   remains available as the trace of those actions.
 
-Do not use a production accounting sheet for this test.
+The implementation suite also passes 124 deterministic tests. This test proves
+the controlled single-report path; it does not establish production throughput
+or eliminate the concurrency limitation described above.
