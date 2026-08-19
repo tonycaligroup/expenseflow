@@ -77,3 +77,26 @@ created one additional synthetic object because uploads are not natively
 idempotent. The regression fix persists the upload response before validation,
 supports both reference formats, and can finalize a persisted `uploaded` or
 `upload_invalid` reservation without uploading the file again.
+
+## Live Receipt Regression Result
+
+Kolo retested commit `0c7b8f0` with a fresh synthetic draft expense. Result:
+**PASS**.
+
+- All 107 tests passed in Kolo.
+- The first `upload-receipt` call returned `attached`; the identical second call
+  returned `already_attached` before invoking another platform upload.
+- Both calls returned object ID `01a01ae2-e902-7d72-901a-afe12d75d46c`, reference
+  `kolo-object://01a01ae2-e902-7d72-901a-afe12d75d46c`, and SHA-256
+  `a33d74e7522c85e8ec721b87871f8c69138bca2010b9ed0ae6f4a5408cf995cb`.
+- Exactly one `skill.receipt` record existed for the expense and hash. The
+  expense had exactly one receipt attachment.
+- Neither governed payload contained `/home`, `/tmp`, `/media`, `file://`, or
+  another staged local path.
+- Kolo soft-deleted the fresh synthetic expense and receipt records after
+  collecting evidence. Object-store deletion was not attempted.
+
+The earlier diagnostic direct upload created object
+`01a01add-bd70-7d43-ad41-cadbfb9be44c`. The successful regression run created
+one separate object as expected; its repeated ExpenseFlow call did not create a
+third object.
