@@ -31,6 +31,12 @@ Use deterministic scripts for:
 
 Never hand-compute totals, invent accounting payloads, or mark approvals final from model judgment alone. The model may produce a candidate; deterministic code must validate before state changes.
 
+Deterministic code lives under `scripts/expenseflow/`. Use `scripts/expenseflow_cli.py` for JSON command-line validation and orchestration. Run local tests with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
 ## Phase 0 Gate
 
 Before building or relying on platform-dependent workflows, run the Phase 0 verification tests in [phase0-platform-tests.md](references/phase0-platform-tests.md).
