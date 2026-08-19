@@ -87,6 +87,42 @@ class KoloCommandGatewayTests(unittest.TestCase):
 
         self.assertEqual(records[0]["external_id"], "exp_1")
 
+    def test_list_records_fetches_payloads_when_list_omits_them(self):
+        runner = ScriptedRunner(
+            [
+                {
+                    "status": "ok",
+                    "records": [
+                        {
+                            "record_type": "skill.user_profile",
+                            "external_id": "2",
+                            "status": "active",
+                            "schema_version": 1,
+                        }
+                    ],
+                },
+                {
+                    "status": "ok",
+                    "record": {
+                        "record_type": "skill.user_profile",
+                        "external_id": "2",
+                        "payload": {"user_id": 2, "status": "active"},
+                        "status": "active",
+                        "schema_version": 1,
+                    },
+                },
+            ]
+        )
+        gateway = KoloCommandGateway(runner=runner)
+
+        records = gateway.list_records("skill.user_profile", status="active")
+
+        self.assertEqual(records[0]["payload"]["user_id"], 2)
+        self.assertEqual(
+            runner.commands[1],
+            ["kolo", "record-get", "--record-type", "skill.user_profile", "--external-id", "2"],
+        )
+
     def test_contact_agent_requires_queue_id(self):
         gateway = KoloCommandGateway(runner=ScriptedRunner([{"status": "ok"}]))
 
@@ -95,11 +131,20 @@ class KoloCommandGatewayTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "missing_queue_id")
 
     def test_create_task_accepts_task_id_variants(self):
-        gateway = KoloCommandGateway(runner=ScriptedRunner([{"taskId": "task_1", "status": "open"}]))
+        gateway = KoloCommandGateway(runner=ScriptedRunner([{"task": {"task_id": "task_1", "status": "not_started"}}]))
 
         task = gateway.create_task("Review", 2, {"report_id": "er_1"})
 
         self.assertEqual(task["task_id"], "task_1")
+        self.assertEqual(task["status"], "not_started")
+
+    def test_create_task_does_not_send_unsupported_metadata_flag(self):
+        runner = ScriptedRunner([{"taskId": "task_1", "status": "open"}])
+        gateway = KoloCommandGateway(runner=runner)
+
+        gateway.create_task("Review", 2, {"report_id": "er_1"})
+
+        self.assertEqual(runner.commands[0], ["kolo", "task-create", "--title", "Review", "--user", "2"])
 
     def test_log_action_requires_audit_event_id(self):
         gateway = KoloCommandGateway(runner=ScriptedRunner([{"status": "ok"}]))
@@ -107,6 +152,15 @@ class KoloCommandGatewayTests(unittest.TestCase):
         with self.assertRaises(ExpenseFlowError) as ctx:
             gateway.log_action("skill.expense", "Captured", "key")
         self.assertEqual(ctx.exception.code, "missing_audit_event_id")
+
+    def test_log_action_sends_details_flag_for_metadata(self):
+        runner = ScriptedRunner([{"auditEventId": "audit_1"}])
+        gateway = KoloCommandGateway(runner=runner)
+
+        gateway.log_action("skill.expense", "Captured", "key", {"expense_id": "exp_1"})
+
+        self.assertIn("--details", runner.commands[0])
+        self.assertNotIn("--metadata", runner.commands[0])
 
     def test_run_command_rejects_invalid_json(self):
         completed = _Completed(returncode=0, stdout="not json", stderr="")

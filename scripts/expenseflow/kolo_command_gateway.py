@@ -57,7 +57,20 @@ class KoloCommandGateway:
                 "Kolo record-list returned an unexpected response shape.",
                 details={"record_type": record_type},
             )
-        return [_normalize_record(row, record_type, row.get("external_id")) for row in rows]
+        records = []
+        for row in rows:
+            external_id = _record_external_id(row)
+            if external_id is None:
+                raise ExpenseFlowError(
+                    "invalid_kolo_response",
+                    "Kolo record-list returned a record without an external ID.",
+                    details={"record_type": record_type},
+                )
+            if "payload" not in row:
+                records.append(self.get_record(record_type, external_id))
+            else:
+                records.append(_normalize_record(row, record_type, external_id))
+        return records
 
     def set_record_status(self, record_type, external_id, status):
         result = self.runner(
@@ -92,17 +105,22 @@ class KoloCommandGateway:
 
     def create_task(self, title, user_id, metadata=None):
         command = ["kolo", "task-create", "--title", title, "--user", str(user_id)]
-        if metadata:
-            command.extend(["--metadata", json.dumps(metadata, sort_keys=True)])
         result = self.runner(command)
-        task_id = result.get("task_id") or result.get("taskId") or result.get("id")
+        task = result.get("task", {}) if isinstance(result.get("task"), dict) else {}
+        task_id = task.get("task_id") or task.get("taskId") or task.get("id")
+        task_id = task_id or result.get("task_id") or result.get("taskId") or result.get("id")
         if not task_id:
             raise ExpenseFlowError(
                 "missing_task_id",
                 "Kolo task-create did not return a task ID.",
                 details={"title": title, "user_id": user_id},
             )
-        return {"task_id": task_id, "status": result.get("status", "open"), "raw": result}
+        return {
+            "task_id": task_id,
+            "status": task.get("status", result.get("status", "open")),
+            "metadata": metadata or {},
+            "raw": result,
+        }
 
     def log_action(self, category, title, idempotency_key, metadata=None):
         command = [
@@ -116,7 +134,7 @@ class KoloCommandGateway:
             idempotency_key,
         ]
         if metadata:
-            command.extend(["--metadata", json.dumps(metadata, sort_keys=True)])
+            command.extend(["--details", json.dumps(metadata, sort_keys=True)])
         result = self.runner(command)
         audit_event_id = result.get("auditEventId") or result.get("audit_event_id") or result.get("id")
         if not audit_event_id:
@@ -165,3 +183,7 @@ def _normalize_record(result, record_type, external_id, payload=None, status=Non
         "schema_version": record.get("schema_version", record.get("schemaVersion", schema_version)),
     }
     return normalized
+
+
+def _record_external_id(record):
+    return record.get("external_id", record.get("externalId"))
