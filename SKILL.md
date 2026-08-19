@@ -322,3 +322,8 @@ Retries must be bounded and idempotent.
 
 Follow [security-and-data-handling.md](references/security-and-data-handling.md)
 for receipt references, approval messages, logs, exports, and integration data.
+
+The first live three-user Kolo pilot results are documented in
+[live-pilot-results.md](references/live-pilot-results.md). Keep participant,
+organization, queue, task, and governed-record identifiers in the private Kolo
+audit thread rather than publishing them in this repository.
