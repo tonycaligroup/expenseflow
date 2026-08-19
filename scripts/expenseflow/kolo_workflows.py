@@ -213,7 +213,10 @@ def capture_expense_with_discovery(
             _notify_admins(
                 gateway,
                 settings,
-                f"ExpenseFlow blocked an expense from unverified Kolo user {submitter_user_id}.",
+                _with_message_prefix(
+                    settings,
+                    f"ExpenseFlow blocked an expense from unverified Kolo user {submitter_user_id}.",
+                ),
                 excluded_user_id=submitter_user_id,
             )
             gateway.log_action(
@@ -248,9 +251,12 @@ def capture_expense_with_discovery(
         queue_ids = _notify_admins(
             gateway,
             settings,
-            (
-                f"ExpenseFlow onboarding review needed for Kolo user {submitter_user_id}. "
-                f"Expense {expense['expense_id']} is held pending verification."
+            _with_message_prefix(
+                settings,
+                (
+                    f"ExpenseFlow onboarding review needed for Kolo user {submitter_user_id}. "
+                    f"Expense {expense['expense_id']} is held pending verification."
+                ),
             ),
             excluded_user_id=submitter_user_id,
         )
@@ -357,7 +363,10 @@ def approve_user_onboarding(gateway, user_id, admin_user_id, approver_user_id, o
     upsert_user_profile(gateway, updated)
     message = gateway.contact_agent(
         user_id,
-        f"ExpenseFlow access was approved. Please acknowledge expense policy version {policy_version}.",
+        _with_message_prefix(
+            settings,
+            f"ExpenseFlow access was approved. Please acknowledge expense policy version {policy_version}.",
+        ),
     )
     gateway.log_action(
         "skill.user_profile",
@@ -439,6 +448,7 @@ def submit_report_for_approval(
     report = create_report(expenses, submitter, title=title, period=period, report_id=report_id)
     report["org_id"] = org_id
     policies = _load_policies(gateway, org_id)
+    settings = _optional_payload(gateway, EXPENSE_SETTINGS, org_id, default={})
     user_profiles = [
         profile
         for profile in (_payload(record) for record in gateway.list_records(USER_PROFILE))
@@ -464,10 +474,10 @@ def submit_report_for_approval(
     approval_request["approver_snapshot_id"] = snapshot["snapshot_id"]
     message_result = gateway.contact_agent(
         approval_request["approver_user_id"],
-        _approval_message(approval["report"], submitter),
+        _with_message_prefix(settings, _approval_message(approval["report"], submitter)),
     )
     task = gateway.create_task(
-        f"Review expense report {approval['report']['report_id']}",
+        _with_message_prefix(settings, f"Review expense report {approval['report']['report_id']}"),
         approval_request["approver_user_id"],
         {"report_id": approval["report"]["report_id"]},
     )
@@ -690,9 +700,12 @@ def _hold_for_identity_mapping(gateway, expense_data, settings, sender_id, org_i
     queue_ids = _notify_admins(
         gateway,
         settings,
-        (
-            f"ExpenseFlow needs identity mapping for sender {sender_id}. "
-            f"Expense {expense['expense_id']} is held; map the sender to a current Kolo user ID."
+        _with_message_prefix(
+            settings,
+            (
+                f"ExpenseFlow needs identity mapping for sender {sender_id}. "
+                f"Expense {expense['expense_id']} is held; map the sender to a current Kolo user ID."
+            ),
         ),
     )
     return {
@@ -722,6 +735,11 @@ def _require_record_org(payload, org_id, entity):
             f"{entity.capitalize()} does not belong to this ExpenseFlow organization.",
             details={"expected_org_id": str(org_id), "actual_org_id": str(record_org_id)},
         )
+
+
+def _with_message_prefix(settings, message):
+    prefix = str(settings.get("message_prefix") or "").strip()
+    return f"{prefix} {message}" if prefix else message
 
 
 def _approval_message(report, submitter):

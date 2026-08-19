@@ -118,6 +118,11 @@ role, team, or employment status. Treat `kolo list-peers` as organization
 membership evidence only. Require an ExpenseFlow admin to confirm the
 employee's approver unless an optional HR integration supplies a candidate.
 
+Use the optional `message_prefix` setting for pilots, sandboxes, or other
+environments where every outbound message and task must carry a fixed warning.
+The deterministic workflow prepends it to onboarding, identity, and approval
+communications.
+
 Do not collect or store bank account numbers, routing numbers, card numbers, SSNs, or tax IDs. Track reimbursement method/status only; accounting or payroll handles actual payment.
 
 ## Employee Lifecycle

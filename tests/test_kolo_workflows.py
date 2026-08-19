@@ -123,7 +123,14 @@ class KoloWorkflowTests(unittest.TestCase):
 
     def test_unknown_org_member_starts_onboarding_and_holds_expense(self):
         gateway = FakeKoloGateway(peers=[{"user_id": 7, "display_name": "New Employee", "org_id": "default"}])
-        upsert_expense_settings(gateway, "default", {"expense_admin_user_ids": [99]})
+        upsert_expense_settings(
+            gateway,
+            "default",
+            {
+                "expense_admin_user_ids": [99],
+                "message_prefix": "EXPENSEFLOW PILOT TEST - NO REIMBURSEMENT",
+            },
+        )
 
         result = capture_expense_with_discovery(
             gateway,
@@ -143,7 +150,38 @@ class KoloWorkflowTests(unittest.TestCase):
         self.assertEqual(gateway.get_record(USER_PROFILE, 7)["status"], "pending_admin_approval")
         self.assertEqual(gateway.get_record(EXPENSE, "exp_new")["status"], "held_pending_onboarding")
         self.assertEqual(gateway.messages[0]["target_user_id"], 99)
+        self.assertTrue(gateway.messages[0]["message"].startswith("EXPENSEFLOW PILOT TEST - NO REIMBURSEMENT"))
         self.assertNotIn("Office Depot", gateway.messages[0]["message"])
+
+    def test_approval_message_and_task_use_configured_prefix(self):
+        upsert_expense_settings(
+            self.gateway,
+            "default",
+            {"message_prefix": "EXPENSEFLOW PILOT TEST - NO REIMBURSEMENT"},
+        )
+        capture_expense(
+            self.gateway,
+            {
+                "vendor": "Office Depot",
+                "date": "2026-08-18",
+                "amount": "12.00",
+                "currency": "USD",
+                "category": "Office Supplies",
+            },
+            1,
+            expense_id="exp_prefixed",
+        )
+
+        submit_report_for_approval(
+            self.gateway,
+            1,
+            ["exp_prefixed"],
+            report_id="er_prefixed",
+            approval_request_id="ar_prefixed",
+        )
+
+        self.assertTrue(self.gateway.messages[0]["message"].startswith("EXPENSEFLOW PILOT TEST - NO REIMBURSEMENT"))
+        self.assertTrue(self.gateway.tasks[0]["title"].startswith("EXPENSEFLOW PILOT TEST - NO REIMBURSEMENT"))
 
     def test_unknown_non_member_is_blocked(self):
         gateway = FakeKoloGateway(peers=[])
