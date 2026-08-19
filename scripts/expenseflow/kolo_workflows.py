@@ -1,9 +1,22 @@
+import hashlib
+import mimetypes
+from pathlib import Path
+
 from .approval_engine import create_approval_request, record_approval_decision
 from .csv_export import generate_report_csv
 from .errors import ExpenseFlowError
 from .expense_core import create_expense, detect_duplicates
 from .models import utc_now
 from .onboarding_engine import acknowledge_policy, approve_onboarding, create_delegation, create_discovered_profile
+from .receipt_engine import ALLOWED_RECEIPT_CONTENT_TYPES, normalize_receipt_attachment
+from .reminder_engine import (
+    advance_reminder_schedule,
+    format_utc,
+    initialize_reminder_schedule,
+    is_reminder_due,
+    normalize_reminder_settings,
+    parse_utc,
+)
 from .report_engine import create_report, transition_report
 from .status import validate_transition
 
@@ -14,12 +27,14 @@ USER_PROFILE = "skill.user_profile"
 APPROVAL_POLICY = "skill.approval_policy"
 DEPARTMENT_POLICY = "skill.department_policy"
 EXPENSE = "skill.expense"
+RECEIPT = "skill.receipt"
 EXPENSE_REPORT = "skill.expense_report"
 APPROVAL_REQUEST = "skill.approval_request"
 APPROVAL_DECISION = "skill.approval_decision"
 APPROVAL_DELEGATION = "skill.approval_delegation"
 APPROVER_SNAPSHOT = "skill.approver_snapshot"
 IDENTITY_DISCOVERY = "skill.identity_discovery"
+NOTIFICATION_EVENT = "skill.notification_event"
 
 
 def upsert_user_profile(gateway, profile):
@@ -34,6 +49,14 @@ def upsert_user_profile(gateway, profile):
 
 
 def upsert_expense_settings(gateway, org_id, settings):
+    normalize_reminder_settings(settings)
+    if settings.get("max_receipt_bytes") is not None:
+        try:
+            max_receipt_bytes = int(settings["max_receipt_bytes"])
+        except (TypeError, ValueError):
+            raise ExpenseFlowError("invalid_max_receipt_bytes", "max_receipt_bytes must be a positive integer.")
+        if max_receipt_bytes <= 0:
+            raise ExpenseFlowError("invalid_max_receipt_bytes", "max_receipt_bytes must be a positive integer.")
     return gateway.upsert_record(EXPENSE_SETTINGS, org_id, {"org_id": org_id, **settings}, "active")
 
 
@@ -413,9 +436,144 @@ def capture_expense(gateway, expense_data, submitter_user_id, org_id="default", 
     submitter = _payload(gateway.get_record(USER_PROFILE, submitter_user_id))
     _require_record_org(submitter, org_id, "submitter")
     settings = _optional_payload(gateway, EXPENSE_SETTINGS, org_id, default={})
+    expense_data, receipt_attachment = _prepare_expense_receipt(expense_data, settings)
     candidate = create_expense(expense_data, submitter, settings, expense_id)
+    if receipt_attachment:
+        candidate["receipt_attachments"] = [receipt_attachment]
     candidate["org_id"] = org_id
     return _persist_expense(gateway, candidate, org_id, submitter_user_id)
+
+
+def attach_receipt_reference(gateway, expense_id, attachment, acting_user_id, org_id="default"):
+    expense = _payload(gateway.get_record(EXPENSE, expense_id))
+    _require_record_org(expense, org_id, "expense")
+    settings = _optional_payload(gateway, EXPENSE_SETTINGS, org_id, default={})
+    _require_receipt_actor(expense, settings, acting_user_id)
+    _require_receipt_editable(expense)
+    receipt = normalize_receipt_attachment(attachment, settings)
+
+    existing = list(expense.get("receipt_attachments") or [])
+    for saved in existing:
+        if saved.get("attachment_id") == receipt["attachment_id"]:
+            return {"status": "already_attached", "expense": expense, "receipt": saved}
+
+    receipt = _store_receipt_record(gateway, expense_id, org_id, receipt)
+    updated = dict(expense)
+    updated["receipt_attachments"] = [*existing, receipt]
+    updated["receipt_ref"] = updated.get("receipt_ref") or receipt["object_store_object_id"]
+    updated["receipt_url"] = updated.get("receipt_url") or receipt["reference"]
+    updated["receipt_updated_at"] = utc_now()
+    gateway.upsert_record(EXPENSE, expense_id, updated, updated["status"])
+    gateway.log_action(
+        "skill.expense",
+        "Receipt attached to expense",
+        f"expenseflow:receipt:{expense_id}:{receipt['attachment_id']}",
+        {
+            "expense_id": expense_id,
+            "attachment_id": receipt["attachment_id"],
+            "acting_user_id": _normalize_user_id(acting_user_id),
+        },
+    )
+    return {"status": "attached", "expense": updated, "receipt": receipt}
+
+
+def upload_and_attach_receipt(gateway, expense_id, file_path, acting_user_id, org_id="default", metadata=None):
+    expense = _payload(gateway.get_record(EXPENSE, expense_id))
+    _require_record_org(expense, org_id, "expense")
+    settings = _optional_payload(gateway, EXPENSE_SETTINGS, org_id, default={})
+    _require_receipt_actor(expense, settings, acting_user_id)
+    _require_receipt_editable(expense)
+
+    path = Path(file_path).resolve()
+    if not path.is_file():
+        raise ExpenseFlowError("receipt_file_not_found", "Receipt file is not available at the supplied local path.")
+    if not _is_inbound_receipt_path(path):
+        raise ExpenseFlowError(
+            "receipt_path_not_allowed",
+            "Receipt uploads must come from Kolo's media/inbound staging directory.",
+        )
+    size_bytes = path.stat().st_size
+    max_bytes = settings.get("max_receipt_bytes")
+    if max_bytes is not None and size_bytes > int(max_bytes):
+        raise ExpenseFlowError(
+            "receipt_too_large",
+            "Receipt exceeds the organization's configured size limit.",
+            details={"size_bytes": size_bytes, "max_receipt_bytes": int(max_bytes)},
+        )
+    upload_metadata = metadata or {}
+    content_type = str(
+        upload_metadata.get("content_type") or mimetypes.guess_type(path.name)[0] or ""
+    ).lower()
+    if content_type not in ALLOWED_RECEIPT_CONTENT_TYPES:
+        raise ExpenseFlowError(
+            "unsupported_receipt_type",
+            "Receipt must be a PDF or supported image type.",
+            details={"content_type": content_type or None},
+        )
+    sha256 = _file_sha256(path)
+    for saved in expense.get("receipt_attachments") or []:
+        if saved.get("sha256") == sha256:
+            return {"status": "already_attached", "expense": expense, "receipt": saved}
+
+    receipt_id = _receipt_external_id(expense_id, sha256)
+    existing_receipt = _optional_payload(gateway, RECEIPT, receipt_id)
+    if existing_receipt is not None:
+        if existing_receipt.get("status") == "stored" and existing_receipt.get("attachment"):
+            return attach_receipt_reference(
+                gateway,
+                expense_id,
+                existing_receipt["attachment"],
+                acting_user_id,
+                org_id,
+            )
+        raise ExpenseFlowError(
+            "receipt_upload_incomplete",
+            "A prior upload attempt for this receipt did not finish cleanly; review the reserved receipt record before retrying.",
+            details={"receipt_id": receipt_id, "status": existing_receipt.get("status")},
+        )
+
+    reservation = {
+        "receipt_id": receipt_id,
+        "expense_id": expense_id,
+        "org_id": org_id,
+        "status": "uploading",
+        "sha256": sha256,
+        "filename": Path(str(upload_metadata.get("filename") or path.name)).name,
+        "content_type": content_type,
+        "size_bytes": size_bytes,
+        "reserved_at": utc_now(),
+        "schema_version": 1,
+    }
+    reserved = gateway.upsert_record(RECEIPT, receipt_id, reservation, "uploading")
+    if not reserved.get("created", False):
+        raise ExpenseFlowError(
+            "receipt_upload_incomplete",
+            "Another receipt upload already reserved this content hash.",
+            details={"receipt_id": receipt_id},
+        )
+
+    try:
+        uploaded = gateway.upload_file(str(path))
+    except ExpenseFlowError as exc:
+        reservation["status"] = "upload_unknown"
+        reservation["upload_error"] = exc.code
+        reservation["completed_at"] = utc_now()
+        gateway.upsert_record(RECEIPT, receipt_id, reservation, reservation["status"])
+        raise
+    receipt_data = {
+        **upload_metadata,
+        **uploaded,
+        "filename": upload_metadata.get("filename") or path.name,
+        "content_type": content_type,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+    }
+    receipt = normalize_receipt_attachment(receipt_data, settings)
+    reservation["status"] = "stored"
+    reservation["attachment"] = receipt
+    reservation["completed_at"] = utc_now()
+    gateway.upsert_record(RECEIPT, receipt_id, reservation, "stored")
+    return attach_receipt_reference(gateway, expense_id, receipt, acting_user_id, org_id)
 
 
 def _persist_expense(gateway, candidate, org_id, submitter_user_id):
@@ -425,6 +583,8 @@ def _persist_expense(gateway, candidate, org_id, submitter_user_id):
         if str(expense.get("org_id", org_id)) == str(org_id)
     ]
     candidate["duplicate_candidates"] = detect_duplicates(candidate, existing)
+    for receipt in candidate.get("receipt_attachments") or []:
+        _store_receipt_record(gateway, candidate["expense_id"], org_id, receipt)
     gateway.upsert_record(EXPENSE, candidate["expense_id"], candidate, candidate["status"])
     gateway.log_action(
         "skill.expense",
@@ -475,6 +635,8 @@ def submit_report_for_approval(
         return approval
 
     approval_request = approval["approval_request"]
+    approval_request["org_id"] = org_id
+    approval_request = initialize_reminder_schedule(approval_request, settings)
     snapshot = _create_approver_snapshot(gateway, approval["report"], approval_request, policies)
     approval_request["approver_snapshot_id"] = snapshot["snapshot_id"]
     message_result = gateway.contact_agent(
@@ -520,6 +682,8 @@ def decide_report_approval(gateway, approval_request_id, approver_user_id, decis
         note=note,
         decision_id=decision_id,
     )
+    result["approval_request"]["reminder_status"] = "resolved"
+    result["approval_request"]["next_reminder_at"] = None
     gateway.upsert_record(EXPENSE_REPORT, result["report"]["report_id"], result["report"], result["report"]["status"])
     gateway.upsert_record(APPROVAL_REQUEST, approval_request_id, result["approval_request"], result["approval_request"]["status"])
     gateway.upsert_record(
@@ -530,6 +694,20 @@ def decide_report_approval(gateway, approval_request_id, approver_user_id, decis
     )
     for expense in result["expenses"]:
         gateway.upsert_record(EXPENSE, expense["expense_id"], expense, expense["status"])
+    task_id = result["approval_request"].get("task_id")
+    if task_id:
+        try:
+            completed_task = gateway.complete_task(task_id)
+            result["approval_request"]["task_completion_status"] = completed_task.get("status", "completed")
+        except ExpenseFlowError as exc:
+            result["approval_request"]["task_completion_status"] = "failed"
+            result["approval_request"]["task_completion_error"] = exc.code
+        gateway.upsert_record(
+            APPROVAL_REQUEST,
+            approval_request_id,
+            result["approval_request"],
+            result["approval_request"]["status"],
+        )
     gateway.log_action(
         "skill.approval_decision",
         "Expense report approval decided",
@@ -541,6 +719,120 @@ def decide_report_approval(gateway, approval_request_id, approver_user_id, decis
         },
     )
     return result
+
+
+def send_due_approval_reminders(gateway, org_id="default", as_of=None):
+    as_of = format_utc(parse_utc(as_of or utc_now(), "as_of"))
+    settings = _optional_payload(gateway, EXPENSE_SETTINGS, org_id, default={})
+    config = normalize_reminder_settings(settings)
+    summary = {
+        "org_id": org_id,
+        "as_of": as_of,
+        "enabled": config["enabled"],
+        "scanned": 0,
+        "sent": [],
+        "delivery_unknown": [],
+        "escalated": [],
+        "skipped": [],
+    }
+    if not config["enabled"]:
+        return summary
+
+    for record in gateway.list_records(APPROVAL_REQUEST, status="pending"):
+        request = _payload(record)
+        if str(request.get("org_id", org_id)) != str(org_id):
+            continue
+        summary["scanned"] += 1
+        if not is_reminder_due(request, as_of):
+            continue
+
+        report = _payload(gateway.get_record(EXPENSE_REPORT, request["report_id"]))
+        if report.get("status") != "pending_approval":
+            request = dict(request)
+            request["reminder_status"] = "resolved"
+            request["next_reminder_at"] = None
+            gateway.upsert_record(APPROVAL_REQUEST, request["approval_request_id"], request, request["status"])
+            summary["skipped"].append({"approval_request_id": request["approval_request_id"], "reason": "report_resolved"})
+            continue
+
+        approver = _optional_payload(gateway, USER_PROFILE, request["approver_user_id"])
+        if approver is None or approver.get("status") != "active" or not approver.get("can_approve"):
+            request = dict(request)
+            request["reminder_status"] = "blocked_approver"
+            request["next_reminder_at"] = None
+            gateway.upsert_record(APPROVAL_REQUEST, request["approval_request_id"], request, request["status"])
+            summary["skipped"].append(
+                {"approval_request_id": request["approval_request_id"], "reason": "approver_unavailable"}
+            )
+            escalation_ids = config["escalation_user_ids"] or _admin_user_ids(settings)
+            for admin_user_id in escalation_ids:
+                if str(admin_user_id) == str(request["approver_user_id"]):
+                    continue
+                escalation = _send_notification_once(
+                    gateway,
+                    f"{request['approval_request_id']}:approver-unavailable:{admin_user_id}",
+                    org_id,
+                    admin_user_id,
+                    "approver_unavailable",
+                    _with_message_prefix(settings, _approver_unavailable_message(report, request)),
+                    request,
+                    as_of,
+                )
+                if escalation["status"] == "sent":
+                    summary["escalated"].append(
+                        {"approval_request_id": request["approval_request_id"], "user_id": admin_user_id}
+                    )
+            continue
+
+        attempt = int(request.get("reminder_count") or 0) + 1
+        event_id = f"{request['approval_request_id']}:reminder:{attempt}"
+        delivery = _send_notification_once(
+            gateway,
+            event_id,
+            org_id,
+            request["approver_user_id"],
+            "approval_reminder",
+            _with_message_prefix(settings, _reminder_message(report, request, attempt, config["max_attempts"])),
+            request,
+            as_of,
+        )
+        request = advance_reminder_schedule(request, settings, as_of)
+        gateway.upsert_record(APPROVAL_REQUEST, request["approval_request_id"], request, request["status"])
+        summary[delivery["status"]].append(request["approval_request_id"])
+
+        if request["reminder_status"] == "exhausted":
+            escalation_ids = config["escalation_user_ids"] or _admin_user_ids(settings)
+            for admin_user_id in escalation_ids:
+                if str(admin_user_id) == str(request["approver_user_id"]):
+                    continue
+                escalation_event_id = f"{request['approval_request_id']}:escalation:{admin_user_id}"
+                escalation = _send_notification_once(
+                    gateway,
+                    escalation_event_id,
+                    org_id,
+                    admin_user_id,
+                    "approval_escalation",
+                    _with_message_prefix(settings, _escalation_message(report, request)),
+                    request,
+                    as_of,
+                )
+                if escalation["status"] == "sent":
+                    summary["escalated"].append(
+                        {"approval_request_id": request["approval_request_id"], "user_id": admin_user_id}
+                    )
+    gateway.log_action(
+        "skill.notification_event",
+        "ExpenseFlow approval reminder sweep completed",
+        f"expenseflow:reminder-sweep:{org_id}:{as_of}",
+        {
+            "org_id": org_id,
+            "as_of": as_of,
+            "scanned": summary["scanned"],
+            "sent_count": len(summary["sent"]),
+            "escalated_count": len(summary["escalated"]),
+        },
+    )
+    return summary
 
 
 def export_approved_report_csv(gateway, report_id):
@@ -683,7 +975,10 @@ def _hold_for_identity_mapping(gateway, expense_data, settings, sender_id, org_i
         "display_name": "Pending identity mapping",
         "status": "pending_admin_approval",
     }
+    expense_data, receipt_attachment = _prepare_expense_receipt(expense_data, settings)
     expense = create_expense(expense_data, pending_submitter, settings, expense_id)
+    if receipt_attachment:
+        expense["receipt_attachments"] = [receipt_attachment]
     expense["org_id"] = org_id
     expense["sender_id"] = sender_id
     _persist_expense(gateway, expense, org_id, None)
@@ -721,6 +1016,139 @@ def _hold_for_identity_mapping(gateway, expense_data, settings, sender_id, org_i
         "identity_mapping_required": True,
         "admin_notification_queue_ids": queue_ids,
     }
+
+
+def _prepare_expense_receipt(expense_data, settings):
+    prepared = dict(expense_data)
+    attachment_data = prepared.pop("receipt_attachment", None)
+    if not attachment_data:
+        return prepared, None
+    receipt = normalize_receipt_attachment(attachment_data, settings)
+    prepared["receipt_ref"] = receipt["object_store_object_id"]
+    prepared["receipt_url"] = receipt["reference"]
+    return prepared, receipt
+
+
+def _require_receipt_actor(expense, settings, acting_user_id):
+    actor = _normalize_user_id(acting_user_id)
+    submitter = _normalize_user_id(expense.get("submitter_user_id"))
+    if actor != submitter and actor not in _admin_user_ids(settings):
+        raise ExpenseFlowError(
+            "unauthorized_receipt_actor",
+            "Only the expense submitter or an ExpenseFlow admin can attach a receipt.",
+        )
+
+
+def _require_receipt_editable(expense):
+    if expense.get("status") not in {"draft", "held_pending_onboarding", "held_pending_manager"}:
+        raise ExpenseFlowError(
+            "receipt_locked",
+            "Receipts cannot be changed after an expense report is submitted.",
+            details={"expense_id": expense.get("expense_id"), "status": expense.get("status")},
+        )
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as receipt_file:
+        for chunk in iter(lambda: receipt_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_inbound_receipt_path(path):
+    parts = path.parts
+    return any(parts[index : index + 2] == ("media", "inbound") for index in range(len(parts) - 1))
+
+
+def _receipt_external_id(expense_id, attachment_id):
+    return f"receipt_{expense_id}_{attachment_id}"
+
+
+def _store_receipt_record(gateway, expense_id, org_id, receipt):
+    receipt_id = _receipt_external_id(expense_id, receipt["attachment_id"])
+    existing = _optional_payload(gateway, RECEIPT, receipt_id)
+    if existing is not None:
+        existing_attachment = existing.get("attachment") or {}
+        if (
+            existing.get("status") == "stored"
+            and existing_attachment.get("object_store_object_id") == receipt.get("object_store_object_id")
+        ):
+            return existing_attachment
+        raise ExpenseFlowError(
+            "receipt_record_conflict",
+            "A governed receipt record already exists with different storage data.",
+            details={"receipt_id": receipt_id, "status": existing.get("status")},
+        )
+    payload = {
+        "receipt_id": receipt_id,
+        "expense_id": expense_id,
+        "org_id": org_id,
+        "status": "stored",
+        "attachment": receipt,
+        "created_at": utc_now(),
+        "schema_version": 1,
+    }
+    gateway.upsert_record(RECEIPT, receipt_id, payload, "stored")
+    return receipt
+
+
+def _send_notification_once(gateway, event_id, org_id, target_user_id, kind, message, request, as_of):
+    if _optional_payload(gateway, NOTIFICATION_EVENT, event_id) is not None:
+        return {"status": "skipped", "notification_event_id": event_id}
+    event = {
+        "notification_event_id": event_id,
+        "org_id": org_id,
+        "kind": kind,
+        "approval_request_id": request["approval_request_id"],
+        "report_id": request["report_id"],
+        "target_user_id": target_user_id,
+        "status": "reserved",
+        "reserved_at": as_of,
+        "schema_version": 1,
+    }
+    reservation = gateway.upsert_record(NOTIFICATION_EVENT, event_id, event, "reserved")
+    if not reservation.get("created", False):
+        return {"status": "skipped", "notification_event_id": event_id}
+    try:
+        result = gateway.contact_agent(target_user_id, message)
+    except ExpenseFlowError as exc:
+        event["status"] = "delivery_unknown"
+        event["delivery_error"] = exc.code
+        event["completed_at"] = as_of
+        gateway.upsert_record(NOTIFICATION_EVENT, event_id, event, event["status"])
+        return {"status": "delivery_unknown", "notification_event_id": event_id}
+    event["status"] = "sent"
+    event["queue_id"] = result.get("queueId")
+    event["completed_at"] = as_of
+    gateway.upsert_record(NOTIFICATION_EVENT, event_id, event, "sent")
+    return {"status": "sent", "notification_event_id": event_id, "queue_id": event.get("queue_id")}
+
+
+def _reminder_message(report, request, attempt, max_attempts):
+    totals = ", ".join(
+        f"{currency} {amount}" for currency, amount in sorted((report.get("totals_by_currency") or {}).items())
+    )
+    return (
+        f"ExpenseFlow reminder {attempt}/{max_attempts}: report {report.get('report_id')} "
+        f"from {report.get('submitter_name')} totaling {totals or '0.00'} still needs your decision. "
+        f"Approval request: {request.get('approval_request_id')}."
+    )
+
+
+def _escalation_message(report, request):
+    return (
+        f"ExpenseFlow approval escalation: report {report.get('report_id')} remains pending after "
+        f"{request.get('reminder_count')} reminders to approver {request.get('approver_user_id')}. "
+        f"Approval request: {request.get('approval_request_id')}."
+    )
+
+
+def _approver_unavailable_message(report, request):
+    return (
+        f"ExpenseFlow routing review needed: approver {request.get('approver_user_id')} is no longer eligible "
+        f"for pending report {report.get('report_id')}. Approval request: {request.get('approval_request_id')}."
+    )
 
 
 def _normalize_user_id(user_id):

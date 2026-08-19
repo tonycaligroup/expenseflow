@@ -19,6 +19,11 @@ credentials, tax identities, or banking information.
   current `list-peers` member.
 - Store receipt object IDs or verified platform references. Do not copy receipt
   binaries into record payloads.
+- Accept local receipt uploads only from Kolo's resolved `media/inbound/`
+  staging path. Do not persist or log the local path.
+- Reserve `skill.receipt` by expense ID and SHA-256 before upload. Treat an
+  interrupted upload as `upload_unknown`; do not retry it automatically because
+  `kolo file-upload` is not idempotent.
 - Use deterministic external IDs and idempotency keys.
 - Keep the approver snapshot immutable after report submission.
 - Deactivated, suspended, rejected, or unverified users cannot submit expenses.
@@ -30,6 +35,9 @@ credentials, tax identities, or banking information.
 - Onboarding messages may include user ID and held expense ID.
 - Do not include receipt contents, card data, private notes, or accounting
   credentials in `contact-agent` messages or task titles.
+- Reminder and escalation messages may include report/request IDs, submitter
+  name, totals by currency, attempt count, and assigned approver ID. Do not add
+  vendor line items or receipt content.
 - Treat a natural-language approval reply as a candidate only. Deterministic
   code must verify request ID, responder identity, decision type, current state,
   and idempotency before changing records.

@@ -7,6 +7,7 @@ from expenseflow.errors import ExpenseFlowError
 from expenseflow.kolo_command_gateway import KoloCommandGateway
 from expenseflow.kolo_workflows import (
     acknowledge_expense_policy,
+    attach_receipt_reference,
     approve_user_onboarding,
     capture_expense,
     capture_expense_with_discovery,
@@ -15,6 +16,7 @@ from expenseflow.kolo_workflows import (
     export_approved_report_csv,
     map_sender_identity,
     reconcile_user_directory,
+    send_due_approval_reminders,
     submit_report_for_approval,
     upsert_accounting_destination,
     upsert_approval_delegation,
@@ -22,6 +24,7 @@ from expenseflow.kolo_workflows import (
     upsert_department_policy,
     upsert_expense_settings,
     upsert_user_profile,
+    upload_and_attach_receipt,
 )
 
 
@@ -175,6 +178,35 @@ def cmd_export_csv(args, gateway):
     return _ok(result=export_approved_report_csv(gateway, args.report_id))
 
 
+def cmd_attach_receipt(args, gateway):
+    return _ok(
+        result=attach_receipt_reference(
+            gateway,
+            args.expense_id,
+            _load_json(args.attachment),
+            args.acting_user_id,
+            args.org_id,
+        )
+    )
+
+
+def cmd_upload_receipt(args, gateway):
+    return _ok(
+        result=upload_and_attach_receipt(
+            gateway,
+            args.expense_id,
+            args.file,
+            args.acting_user_id,
+            args.org_id,
+            metadata=_load_json(args.metadata) if args.metadata else None,
+        )
+    )
+
+
+def cmd_send_reminders(args, gateway):
+    return _ok(result=send_due_approval_reminders(gateway, args.org_id, args.as_of))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ExpenseFlow Kolo runtime CLI")
     parser.add_argument("--org-id", default="default")
@@ -267,6 +299,23 @@ def main(argv=None):
     cmd = sub.add_parser("export-csv")
     cmd.add_argument("--report-id", required=True)
     cmd.set_defaults(func=cmd_export_csv)
+
+    cmd = sub.add_parser("attach-receipt")
+    cmd.add_argument("--expense-id", required=True)
+    cmd.add_argument("--acting-user-id", type=int, required=True)
+    cmd.add_argument("--attachment", required=True)
+    cmd.set_defaults(func=cmd_attach_receipt)
+
+    cmd = sub.add_parser("upload-receipt")
+    cmd.add_argument("--expense-id", required=True)
+    cmd.add_argument("--acting-user-id", type=int, required=True)
+    cmd.add_argument("--file", required=True)
+    cmd.add_argument("--metadata")
+    cmd.set_defaults(func=cmd_upload_receipt)
+
+    cmd = sub.add_parser("send-reminders")
+    cmd.add_argument("--as-of")
+    cmd.set_defaults(func=cmd_send_reminders)
 
     args = parser.parse_args(argv)
     gateway = KoloCommandGateway()

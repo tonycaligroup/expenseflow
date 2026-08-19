@@ -21,6 +21,30 @@ class ExpenseFlowKoloCliTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(decide.call_args.args[2], 272086)
 
+    def test_attach_receipt_casts_actor_and_loads_attachment(self):
+        args = SimpleNamespace(
+            expense_id="exp_1",
+            acting_user_id=272426,
+            attachment='{"objectStoreObjectId":"obj_1","filename":"receipt.png"}',
+            org_id="org_1",
+        )
+
+        with patch.object(expenseflow_kolo_cli, "attach_receipt_reference", return_value={"ok": True}) as attach:
+            result = expenseflow_kolo_cli.cmd_attach_receipt(args, gateway=object())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(attach.call_args.args[2]["objectStoreObjectId"], "obj_1")
+        self.assertEqual(attach.call_args.args[3], 272426)
+
+    def test_send_reminders_passes_explicit_clock(self):
+        args = SimpleNamespace(org_id="org_1", as_of="2026-08-19T12:00:00Z")
+
+        with patch.object(expenseflow_kolo_cli, "send_due_approval_reminders", return_value={"ok": True}) as send:
+            result = expenseflow_kolo_cli.cmd_send_reminders(args, gateway=object())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(send.call_args.args[1:], ("org_1", "2026-08-19T12:00:00Z"))
+
 
 if __name__ == "__main__":
     unittest.main()

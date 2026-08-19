@@ -37,7 +37,7 @@ Deterministic code lives under `scripts/expenseflow/`. Use `scripts/expenseflow_
 python3 -m unittest discover -s tests -v
 ```
 
-Current deterministic modules include expense validation, money math, duplicate detection, status transitions, approver routing, approval decision handling, report creation, and CSV export generation.
+Current deterministic modules include expense and receipt validation, money math, duplicate detection, status transitions, approver routing, bounded approval reminders, approval decision handling, report creation, and CSV export generation.
 
 Kolo platform wiring lives in `scripts/expenseflow/kolo_workflows.py`. It must call deterministic core modules for business rules, then persist results through a narrow gateway interface. Tests use `FakeKoloGateway` from `scripts/expenseflow/kolo_gateway.py`; production usage uses `KoloCommandGateway` from `scripts/expenseflow/kolo_command_gateway.py`.
 
@@ -58,6 +58,9 @@ Use `scripts/expenseflow_kolo_cli.py` for Kolo runtime flows:
 - `acknowledge-policy`
 - `submit-report`
 - `decide-report`
+- `attach-receipt`
+- `upload-receipt`
+- `send-reminders`
 - `export-csv`
 
 ## Phase 0 Gate
@@ -89,6 +92,7 @@ Core record types:
 - `skill.approval_policy`
 - `skill.department_policy`
 - `skill.expense`
+- `skill.receipt`
 - `skill.expense_report`
 - `skill.approval_request`
 - `skill.approval_decision`
@@ -111,6 +115,11 @@ When an admin sets up ExpenseFlow:
 8. Create `skill.user_profile` records for employees.
 9. Send policy acknowledgement messages with `kolo contact-agent`.
 10. Log setup completion with `kolo log-action`.
+
+Approval reminders are disabled by default. To enable them, configure
+`approval_reminders.enabled`, `initial_delay_hours`, `interval_hours`,
+`max_attempts`, and optional `escalation_user_ids` in organization settings.
+Configure exactly one isolated reminder cron job per organization.
 
 Organization setup must configure at least one `expense_admin_user_id` or
 `expense_admin_user_ids` value. Kolo user discovery does not expose manager,
@@ -215,6 +224,18 @@ When a user logs a receipt or expense:
 5. Create `skill.expense`.
 6. Return the captured fields, warnings, and next action.
 
+Kolo stages inbound attachments under `media/inbound/`. Pass only a verified
+staged path to `upload-receipt`; local uploads outside that directory are
+rejected. The workflow resolves symlinks, validates the file type and optional
+organization size limit, hashes the file, and reserves a deterministic
+`skill.receipt` record before calling `kolo file-upload FILE_PATH`.
+
+`kolo file-upload` has no native idempotency. A receipt record left as
+`upload_unknown` must be reviewed rather than uploaded again automatically.
+After a successful upload, store only the object-store ID, `kolo://obj/...`
+reference, safe file metadata, and hash. Never persist the staged local path or
+receipt binary. Lock receipt changes once the expense is submitted.
+
 For implementation, call `capture_expense(...)` from `kolo_workflows.py` after receipt extraction has produced draft fields. The workflow loads submitter profile/settings, validates with deterministic code, detects duplicate candidates, writes `skill.expense`, and logs an idempotent audit event.
 
 Expense statuses:
@@ -243,6 +264,28 @@ When a user submits expenses:
 9. Create optional visibility task with `kolo task-create`.
 10. Update report to `pending_approval`.
 11. Log submission.
+
+When reminders are enabled, submission also stores `next_reminder_at`,
+`reminder_count`, and `reminder_status` on the approval request. Run due sweeps
+with deterministic code:
+
+```bash
+PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py \
+  --org-id <org_id> send-reminders
+```
+
+Schedule this command through one `openclaw cron add --session isolated` job per
+organization. The job prompt must include the organization ID. Kolo cron runs a
+single instance of a job at a time; do not configure overlapping jobs for the
+same organization.
+
+Before each delivery, create a deterministic `skill.notification_event`.
+Send only pending, due requests to an approver who is still active and eligible.
+Stop after the configured maximum, notify configured escalation users or
+ExpenseFlow admins, and leave the approval request pending for a human decision.
+Never infer approval from reminder activity. After a decision, set reminders to
+`resolved` and complete the visibility task with
+`kolo task-complete --task-id <task_id>`.
 
 For implementation, call `submit_report_for_approval(...)` from `kolo_workflows.py`. It creates `skill.expense_report`, sends the approver message through the gateway, creates a visibility task, writes `skill.approval_request`, marks included expenses `submitted`, and logs an idempotent audit event.
 

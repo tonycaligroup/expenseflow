@@ -144,6 +144,30 @@ class KoloCommandGateway:
             "raw": result,
         }
 
+    def complete_task(self, task_id):
+        result = self.runner(["kolo", "task-complete", "--task-id", str(task_id)])
+        task = result.get("task", {}) if isinstance(result.get("task"), dict) else {}
+        return {
+            "task_id": task.get("task_id") or task.get("taskId") or task.get("id") or task_id,
+            "status": task.get("status", result.get("status", "completed")),
+            "raw": result,
+        }
+
+    def upload_file(self, file_path):
+        result = self.runner(["kolo", "file-upload", str(file_path)])
+        object_id = result.get("objectStoreObjectId") or result.get("object_store_object_id")
+        reference = result.get("reference") or result.get("url")
+        if not object_id:
+            raise ExpenseFlowError(
+                "missing_receipt_object_id",
+                "Kolo file-upload did not return an object-store ID.",
+            )
+        return {
+            "object_store_object_id": object_id,
+            "reference": reference or f"kolo://obj/{object_id}",
+            "raw": result,
+        }
+
     def log_action(self, category, title, idempotency_key, metadata=None):
         command = [
             "kolo",

@@ -8,11 +8,11 @@ Kolo ran the ExpenseFlow Phase 0 checks on 2026-08-19T00:59 UTC.
 | --- | --- | --- |
 | `contact-agent` returns correlation ID | Pass | Store returned `queueId` on `skill.approval_request.backchannel_queue_id`. |
 | `task-create` returns task ID | Pass | Store returned `task_id`; complete task after approval resolution. |
-| Receipt attachment path handling | Partial | Verify during first real receipt interaction; use temp-file fallback if needed. |
+| Receipt attachment path handling | Pass with constraint | Inbound files are staged under `media/inbound/*`; exact inbound context field names remain undocumented. |
 | `record-upsert` idempotency | Pass | Use record type + external ID as deterministic upsert key. |
 | Custom record statuses | Pass | Use ExpenseFlow lifecycle statuses directly. |
 | `log-action --idempotency-key` | Pass | Use deterministic idempotency keys for every audit event. |
-| CSV delivery to Kolo chat | Unverified | Verify during integration; use Drive/Gmail fallback if needed. |
+| CSV delivery to Kolo chat | Pass | The live pilot delivered a downloadable CSV to the authorized Kolo thread. |
 
 ## Observed Platform Behavior
 
@@ -45,6 +45,25 @@ Repeated `kolo log-action` calls with the same `--idempotency-key` returned the 
 
 Verify during implementation:
 
-1. How inbound receipt attachments appear to the skill.
-2. Whether generated CSV delivery through the Kolo message/media tool works exactly as expected.
-3. Whether QBO write completion returns a stable handle for polling or should rely on backend chat notification.
+1. The exact message-context field names that carry each channel's inbound
+   attachment path.
+2. Whether QBO write completion returns a stable handle for polling or should
+   rely on backend chat notification.
+
+## Receipt And Reminder Verification
+
+Kolo reviewed the next milestone on 2026-08-19 without mutating records or
+sending platform messages.
+
+- Inbound attachments are staged as local files under `media/inbound/*` in the
+  active workspace. Some channels require attachment ingestion to be enabled.
+- `kolo file-upload FILE_PATH` returns `objectStoreObjectId` and a
+  `kolo://obj/...` reference. The command has no native idempotency.
+- Use a deterministic governed `skill.receipt` reservation before upload. Check
+  and reuse a stored receipt record; do not automatically repeat an interrupted
+  upload.
+- Use `openclaw cron add --session isolated` for reminder sweeps. Kolo enforces
+  one running instance per cron job, so configure exactly one job per
+  ExpenseFlow organization.
+- `kolo task-complete --task-id <uuid>` deterministically completes the
+  visibility task and is idempotent for an already completed task.

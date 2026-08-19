@@ -11,6 +11,7 @@ class FakeKoloGateway:
         self.records = {}
         self.messages = []
         self.tasks = []
+        self.uploads = []
         self.audit_events = {}
         self.peers = deepcopy(peers or [])
 
@@ -78,6 +79,23 @@ class FakeKoloGateway:
         }
         self.tasks.append(deepcopy(task))
         return deepcopy(task)
+
+    def complete_task(self, task_id):
+        for task in self.tasks:
+            if task["task_id"] == task_id:
+                task["status"] = "completed"
+                return deepcopy(task)
+        raise ExpenseFlowError("task_not_found", f"No Kolo task found for {task_id}.")
+
+    def upload_file(self, file_path):
+        object_id = f"obj_{uuid4().hex[:12]}"
+        upload = {
+            "object_store_object_id": object_id,
+            "reference": f"kolo://obj/{object_id}",
+            "file_path": file_path,
+        }
+        self.uploads.append(deepcopy(upload))
+        return deepcopy(upload)
 
     def log_action(self, category, title, idempotency_key, metadata=None):
         if idempotency_key in self.audit_events:

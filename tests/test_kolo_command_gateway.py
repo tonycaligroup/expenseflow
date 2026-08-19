@@ -157,6 +157,35 @@ class KoloCommandGatewayTests(unittest.TestCase):
 
         self.assertEqual(runner.commands[0], ["kolo", "task-create", "--title", "Review", "--user", "2"])
 
+    def test_complete_task_uses_verified_task_id_shape(self):
+        runner = ScriptedRunner([{"task": {"taskId": "task_1", "status": "completed"}}])
+        gateway = KoloCommandGateway(runner=runner)
+
+        result = gateway.complete_task("task_1")
+
+        self.assertEqual(result["task_id"], "task_1")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(runner.commands[0], ["kolo", "task-complete", "--task-id", "task_1"])
+
+    def test_upload_file_normalizes_object_store_response(self):
+        runner = ScriptedRunner(
+            [{"objectStoreObjectId": "01a-object", "reference": "kolo://obj/01a-object"}]
+        )
+        gateway = KoloCommandGateway(runner=runner)
+
+        result = gateway.upload_file("media/inbound/receipt.png")
+
+        self.assertEqual(result["object_store_object_id"], "01a-object")
+        self.assertEqual(result["reference"], "kolo://obj/01a-object")
+        self.assertEqual(runner.commands[0], ["kolo", "file-upload", "media/inbound/receipt.png"])
+
+    def test_upload_file_requires_object_store_id(self):
+        gateway = KoloCommandGateway(runner=ScriptedRunner([{"status": "ok"}]))
+
+        with self.assertRaises(ExpenseFlowError) as ctx:
+            gateway.upload_file("media/inbound/receipt.png")
+        self.assertEqual(ctx.exception.code, "missing_receipt_object_id")
+
     def test_log_action_requires_audit_event_id(self):
         gateway = KoloCommandGateway(runner=ScriptedRunner([{"status": "ok"}]))
 
