@@ -1,0 +1,4 @@
+interface:
+  display_name: "ExpenseFlow"
+  short_description: "Expense reports, approvals, and accounting exports"
+  default_prompt: "Use $expenseflow to log receipts, build an expense report, route approval, and export approved expenses."
