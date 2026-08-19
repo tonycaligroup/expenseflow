@@ -37,7 +37,7 @@ REPORT_STATUSES = {
 
 EXPENSE_TRANSITIONS = {
     "draft": {"held_pending_onboarding", "held_pending_manager", "submitted", "rejected"},
-    "held_pending_onboarding": {"submitted", "rejected"},
+    "held_pending_onboarding": {"draft", "submitted", "rejected"},
     "held_pending_manager": {"submitted", "rejected"},
     "submitted": {"approved", "rejected"},
     "approved": {"exported", "synced"},

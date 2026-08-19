@@ -1,4 +1,5 @@
 import unittest
+from datetime import date, timedelta
 
 from scripts.expenseflow.errors import ExpenseFlowError
 from scripts.expenseflow.policy_engine import route_approver, validate_approver
@@ -82,6 +83,41 @@ class ApproverRoutingTests(unittest.TestCase):
                 "Engineering",
             )
         self.assertEqual(ctx.exception.code, "approver_scope_mismatch")
+
+    def test_active_delegation_routes_to_valid_delegate(self):
+        today = date.today()
+        result = route_approver(
+            {"user_id": 1, "department": "Engineering", "approver_user_id": 2},
+            "45.00",
+            {
+                "approval_delegations": [
+                    {
+                        "delegator_user_id": 2,
+                        "delegate_user_id": 3,
+                        "valid_from": (today - timedelta(days=1)).isoformat(),
+                        "valid_until": (today + timedelta(days=1)).isoformat(),
+                        "status": "active",
+                    }
+                ]
+            },
+            [
+                {"user_id": 2, "status": "active", "can_approve": True},
+                {"user_id": 3, "display_name": "Delegate", "status": "active", "can_approve": True},
+            ],
+        )
+
+        self.assertEqual(result["approver_user_id"], 3)
+        self.assertEqual(result["delegated_from_user_id"], 2)
+
+    def test_self_approval_candidate_is_never_selected(self):
+        result = route_approver(
+            {"user_id": 1, "approver_user_id": 1},
+            "45.00",
+            {},
+            [{"user_id": 1, "status": "active", "can_approve": True}],
+        )
+        self.assertEqual(result["status"], "held_pending_manager")
+        self.assertEqual(result["errors"][0]["error"], "self_approval_not_allowed")
 
 
 if __name__ == "__main__":

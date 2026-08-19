@@ -87,6 +87,28 @@ class KoloCommandGateway:
         )
         return _normalize_record(result, record_type, external_id, status=status)
 
+    def list_peers(self):
+        result = self.runner(["kolo", "list-peers"])
+        rows = result if isinstance(result, list) else result.get("peers", result.get("users", []))
+        if not isinstance(rows, list):
+            raise ExpenseFlowError(
+                "invalid_kolo_response",
+                "Kolo list-peers returned an unexpected response shape.",
+            )
+        peers = []
+        for row in rows:
+            user_id = row.get("user_id", row.get("userId"))
+            if user_id is None:
+                raise ExpenseFlowError("invalid_kolo_response", "Kolo peer is missing a user ID.")
+            peers.append(
+                {
+                    "user_id": _normalize_user_id(user_id),
+                    "display_name": row.get("display_name", row.get("displayName")),
+                    "org_id": row.get("org_id", row.get("orgId")),
+                }
+            )
+        return peers
+
     def contact_agent(self, target_user_id, message):
         result = self.runner(["kolo", "contact-agent", "-t", str(target_user_id), "-m", message])
         queue_id = result.get("queueId") or result.get("queue_id")
@@ -187,3 +209,10 @@ def _normalize_record(result, record_type, external_id, payload=None, status=Non
 
 def _record_external_id(record):
     return record.get("external_id", record.get("externalId"))
+
+
+def _normalize_user_id(user_id):
+    try:
+        return int(user_id)
+    except (TypeError, ValueError):
+        return user_id

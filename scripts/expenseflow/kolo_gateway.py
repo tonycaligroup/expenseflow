@@ -7,11 +7,12 @@ from .errors import ExpenseFlowError
 class FakeKoloGateway:
     """Governed-record and messaging test double for Kolo workflows."""
 
-    def __init__(self):
+    def __init__(self, peers=None):
         self.records = {}
         self.messages = []
         self.tasks = []
         self.audit_events = {}
+        self.peers = deepcopy(peers or [])
 
     def upsert_record(self, record_type, external_id, payload, status="active", schema_version=1):
         key = (record_type, str(external_id))
@@ -51,6 +52,9 @@ class FakeKoloGateway:
         record["payload"]["status"] = status
         self.records[(record_type, str(external_id))] = deepcopy(record)
         return deepcopy(record)
+
+    def list_peers(self):
+        return deepcopy(self.peers)
 
     def contact_agent(self, target_user_id, message):
         queue_id = f"queue_{uuid4().hex[:12]}"

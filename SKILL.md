@@ -47,7 +47,15 @@ Use `scripts/expenseflow_kolo_cli.py` for Kolo runtime flows:
 - `upsert-settings`
 - `upsert-approval-policy`
 - `upsert-department-policy`
+- `upsert-destination`
+- `upsert-delegation`
+- `configure-org`
+- `reconcile-users`
 - `capture-expense`
+- `capture-with-discovery`
+- `map-sender`
+- `approve-onboarding`
+- `acknowledge-policy`
 - `submit-report`
 - `decide-report`
 - `export-csv`
@@ -77,6 +85,7 @@ Core record types:
 - `skill.expense_settings`
 - `skill.accounting_destination`
 - `skill.user_profile`
+- `skill.identity_discovery`
 - `skill.approval_policy`
 - `skill.department_policy`
 - `skill.expense`
@@ -103,6 +112,12 @@ When an admin sets up ExpenseFlow:
 9. Send policy acknowledgement messages with `kolo contact-agent`.
 10. Log setup completion with `kolo log-action`.
 
+Organization setup must configure at least one `expense_admin_user_id` or
+`expense_admin_user_ids` value. Kolo user discovery does not expose manager,
+role, team, or employment status. Treat `kolo list-peers` as organization
+membership evidence only. Require an ExpenseFlow admin to confirm the
+employee's approver unless an optional HR integration supplies a candidate.
+
 Do not collect or store bank account numbers, routing numbers, card numbers, SSNs, or tax IDs. Track reimbursement method/status only; accounting or payroll handles actual payment.
 
 ## Employee Lifecycle
@@ -119,12 +134,21 @@ Scheduled discovery:
 
 Just-in-time discovery:
 
+- Resolve a known inbound `sender_id` through `skill.user_profile`.
+- If inbound context has only an unmapped UUID sender ID, store the validated
+  expense as `held_pending_onboarding`, create `skill.identity_discovery` as
+  `pending_admin_mapping`, and ask an admin to map it to an integer Kolo user ID.
+- Never guess the UUID-to-integer identity mapping.
 - If an unknown user submits an expense, verify them against `kolo list-peers`.
 - If they are an org member, create `skill.user_profile` as `pending_admin_approval`.
 - Store the expense as `held_pending_onboarding`.
 - Notify admin with expense context.
 - Require admin approval and policy acknowledgement before releasing the expense.
 - If the sender is not an org member, reject or quarantine and notify admin.
+
+Release an onboarding-held expense back to `draft`, not directly to
+`submitted`. This preserves report grouping, policy checks, and approver
+snapshot creation before submission.
 
 User statuses:
 
@@ -169,6 +193,11 @@ Before sending an approval request, re-validate the selected approver:
 - Active delegation is respected.
 
 Create an immutable `skill.approver_snapshot` at submission time so historical reports remain auditable after policy changes.
+
+An active `skill.approval_delegation` may replace the routed approver only when
+the date range is valid and the delegate is an active, eligible approver. More
+than one active delegation for the same approver is an error. Never route an
+expense back to its submitter through direct assignment or delegation.
 
 ## Expense Capture
 
@@ -285,3 +314,6 @@ Every deterministic command must print JSON. On failure, return:
 Distinguish missing records, backend failures, permission errors, file upload failures, delivery failures, rejected QBO writes, and partial export failures.
 
 Retries must be bounded and idempotent.
+
+Follow [security-and-data-handling.md](references/security-and-data-handling.md)
+for receipt references, approval messages, logs, exports, and integration data.

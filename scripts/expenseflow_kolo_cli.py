@@ -6,10 +6,18 @@ import sys
 from expenseflow.errors import ExpenseFlowError
 from expenseflow.kolo_command_gateway import KoloCommandGateway
 from expenseflow.kolo_workflows import (
+    acknowledge_expense_policy,
+    approve_user_onboarding,
     capture_expense,
+    capture_expense_with_discovery,
+    configure_organization,
     decide_report_approval,
     export_approved_report_csv,
+    map_sender_identity,
+    reconcile_user_directory,
     submit_report_for_approval,
+    upsert_accounting_destination,
+    upsert_approval_delegation,
     upsert_approval_policy,
     upsert_department_policy,
     upsert_expense_settings,
@@ -41,7 +49,38 @@ def cmd_upsert_approval_policy(args, gateway):
 
 
 def cmd_upsert_department_policy(args, gateway):
-    return _ok(result=upsert_department_policy(gateway, args.department, _load_json(args.policy)))
+    return _ok(result=upsert_department_policy(gateway, args.department, _load_json(args.policy), args.org_id))
+
+
+def cmd_upsert_destination(args, gateway):
+    return _ok(result=upsert_accounting_destination(gateway, args.org_id, _load_json(args.destination)))
+
+
+def cmd_upsert_delegation(args, gateway):
+    return _ok(
+        result=upsert_approval_delegation(
+            gateway,
+            _load_json(args.delegation),
+            args.delegation_id,
+            args.org_id,
+        )
+    )
+
+
+def cmd_configure_org(args, gateway):
+    return _ok(
+        result=configure_organization(
+            gateway,
+            args.org_id,
+            _load_json(args.settings),
+            _load_json(args.approval_policy),
+            _load_json(args.destination),
+        )
+    )
+
+
+def cmd_reconcile_users(args, gateway):
+    return _ok(result=reconcile_user_directory(gateway, args.org_id, args.deactivate_missing))
 
 
 def cmd_capture_expense(args, gateway):
@@ -52,6 +91,54 @@ def cmd_capture_expense(args, gateway):
             args.submitter_user_id,
             org_id=args.org_id,
             expense_id=args.expense_id,
+        )
+    )
+
+
+def cmd_capture_with_discovery(args, gateway):
+    return _ok(
+        result=capture_expense_with_discovery(
+            gateway,
+            _load_json(args.expense),
+            args.submitter_user_id,
+            org_id=args.org_id,
+            sender_id=args.sender_id,
+            expense_id=args.expense_id,
+        )
+    )
+
+
+def cmd_map_sender(args, gateway):
+    return _ok(
+        result=map_sender_identity(
+            gateway,
+            args.sender_id,
+            args.user_id,
+            args.admin_user_id,
+            args.org_id,
+        )
+    )
+
+
+def cmd_approve_onboarding(args, gateway):
+    return _ok(
+        result=approve_user_onboarding(
+            gateway,
+            args.user_id,
+            args.admin_user_id,
+            args.approver_user_id,
+            org_id=args.org_id,
+        )
+    )
+
+
+def cmd_acknowledge_policy(args, gateway):
+    return _ok(
+        result=acknowledge_expense_policy(
+            gateway,
+            args.user_id,
+            args.acknowledging_user_id,
+            args.policy_version,
         )
     )
 
@@ -110,11 +197,55 @@ def main(argv=None):
     cmd.add_argument("--policy", required=True)
     cmd.set_defaults(func=cmd_upsert_department_policy)
 
+    cmd = sub.add_parser("upsert-destination")
+    cmd.add_argument("--destination", required=True)
+    cmd.set_defaults(func=cmd_upsert_destination)
+
+    cmd = sub.add_parser("upsert-delegation")
+    cmd.add_argument("--delegation", required=True)
+    cmd.add_argument("--delegation-id")
+    cmd.set_defaults(func=cmd_upsert_delegation)
+
+    cmd = sub.add_parser("configure-org")
+    cmd.add_argument("--settings", required=True)
+    cmd.add_argument("--approval-policy", required=True)
+    cmd.add_argument("--destination", required=True)
+    cmd.set_defaults(func=cmd_configure_org)
+
+    cmd = sub.add_parser("reconcile-users")
+    cmd.add_argument("--deactivate-missing", action="store_true")
+    cmd.set_defaults(func=cmd_reconcile_users)
+
     cmd = sub.add_parser("capture-expense")
     cmd.add_argument("--submitter-user-id", required=True)
     cmd.add_argument("--expense", required=True)
     cmd.add_argument("--expense-id")
     cmd.set_defaults(func=cmd_capture_expense)
+
+    cmd = sub.add_parser("capture-with-discovery")
+    cmd.add_argument("--submitter-user-id", type=int)
+    cmd.add_argument("--sender-id")
+    cmd.add_argument("--expense", required=True)
+    cmd.add_argument("--expense-id")
+    cmd.set_defaults(func=cmd_capture_with_discovery)
+
+    cmd = sub.add_parser("map-sender")
+    cmd.add_argument("--sender-id", required=True)
+    cmd.add_argument("--user-id", type=int, required=True)
+    cmd.add_argument("--admin-user-id", type=int, required=True)
+    cmd.set_defaults(func=cmd_map_sender)
+
+    cmd = sub.add_parser("approve-onboarding")
+    cmd.add_argument("--user-id", type=int, required=True)
+    cmd.add_argument("--admin-user-id", type=int, required=True)
+    cmd.add_argument("--approver-user-id", type=int, required=True)
+    cmd.set_defaults(func=cmd_approve_onboarding)
+
+    cmd = sub.add_parser("acknowledge-policy")
+    cmd.add_argument("--user-id", type=int, required=True)
+    cmd.add_argument("--acknowledging-user-id", type=int, required=True)
+    cmd.add_argument("--policy-version", type=int, required=True)
+    cmd.set_defaults(func=cmd_acknowledge_policy)
 
     cmd = sub.add_parser("submit-report")
     cmd.add_argument("--submitter-user-id", required=True)

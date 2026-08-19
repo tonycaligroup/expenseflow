@@ -63,7 +63,7 @@ def validate_expense(data, settings=None):
 def create_expense(data, submitter, settings=None, expense_id=None):
     validated = validate_expense(data, settings)
     status = "draft"
-    if submitter.get("status") == "pending_admin_approval":
+    if submitter.get("status") in {"discovered", "pending_admin_approval", "pending_policy_ack"}:
         status = "held_pending_onboarding"
     elif submitter.get("status") == "pending_manager_assignment":
         status = "held_pending_manager"

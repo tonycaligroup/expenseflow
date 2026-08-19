@@ -37,6 +37,7 @@ def create_approval_request(report, submitter, policies, user_profiles, request_
         "approver_user_id": route.get("approver_user_id"),
         "approver_name": route.get("approver_name"),
         "routing_reason": route.get("routing_reason"),
+        "delegated_from_user_id": route.get("delegated_from_user_id"),
         "status": "pending",
         "created_at": now,
         "backchannel_queue_id": None,

@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 from .errors import ExpenseFlowError
@@ -55,9 +56,25 @@ def route_approver(submitter, amount, policies, user_profiles):
         if not user_id or user_id in seen:
             continue
         seen.add(user_id)
+        if user_id == submitter.get("user_id"):
+            errors.append({"user_id": user_id, "reason": reason, "error": "self_approval_not_allowed"})
+            continue
         approver = users.get(user_id)
         try:
             validate_approver(approver, amount, department)
+            delegated = _active_delegate(user_id, policies.get("approval_delegations") or [])
+            if delegated is not None:
+                if delegated == submitter.get("user_id"):
+                    errors.append({"user_id": delegated, "reason": reason, "error": "self_approval_not_allowed"})
+                    continue
+                validate_approver(users.get(delegated), amount, department)
+                return {
+                    "status": "ok",
+                    "approver_user_id": delegated,
+                    "approver_name": users[delegated].get("display_name"),
+                    "routing_reason": f"{reason}_delegation",
+                    "delegated_from_user_id": user_id,
+                }
             return {
                 "status": "ok",
                 "approver_user_id": user_id,
@@ -72,3 +89,25 @@ def route_approver(submitter, amount, policies, user_profiles):
         "reason": "no_valid_approver",
         "errors": errors,
     }
+
+
+def _active_delegate(delegator_user_id, delegations, today=None):
+    current_date = today or date.today()
+    matches = []
+    for delegation in delegations:
+        if delegation.get("status") != "active" or delegation.get("delegator_user_id") != delegator_user_id:
+            continue
+        try:
+            valid_from = date.fromisoformat(str(delegation.get("valid_from")))
+            valid_until = date.fromisoformat(str(delegation.get("valid_until")))
+        except ValueError:
+            continue
+        if valid_from <= current_date <= valid_until:
+            matches.append(delegation)
+    if len(matches) > 1:
+        raise ExpenseFlowError(
+            "ambiguous_approval_delegation",
+            "More than one active delegation applies to this approver.",
+            details={"delegator_user_id": delegator_user_id},
+        )
+    return matches[0].get("delegate_user_id") if matches else None

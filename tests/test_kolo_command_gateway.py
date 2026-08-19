@@ -130,6 +130,17 @@ class KoloCommandGatewayTests(unittest.TestCase):
             gateway.contact_agent(2, "Please approve")
         self.assertEqual(ctx.exception.code, "missing_queue_id")
 
+    def test_list_peers_normalizes_platform_fields(self):
+        runner = ScriptedRunner(
+            [{"peers": [{"userId": "7", "displayName": "New Employee", "orgId": "org_1"}]}]
+        )
+        gateway = KoloCommandGateway(runner=runner)
+
+        peers = gateway.list_peers()
+
+        self.assertEqual(peers, [{"user_id": 7, "display_name": "New Employee", "org_id": "org_1"}])
+        self.assertEqual(runner.commands[0], ["kolo", "list-peers"])
+
     def test_create_task_accepts_task_id_variants(self):
         gateway = KoloCommandGateway(runner=ScriptedRunner([{"task": {"task_id": "task_1", "status": "not_started"}}]))
 
