@@ -39,7 +39,18 @@ python3 -m unittest discover -s tests -v
 
 Current deterministic modules include expense validation, money math, duplicate detection, status transitions, approver routing, approval decision handling, report creation, and CSV export generation.
 
-Kolo platform wiring lives in `scripts/expenseflow/kolo_workflows.py`. It must call deterministic core modules for business rules, then persist results through a narrow gateway interface. Tests use `FakeKoloGateway` from `scripts/expenseflow/kolo_gateway.py`; production usage must map the same gateway methods to real Kolo commands before live deployment.
+Kolo platform wiring lives in `scripts/expenseflow/kolo_workflows.py`. It must call deterministic core modules for business rules, then persist results through a narrow gateway interface. Tests use `FakeKoloGateway` from `scripts/expenseflow/kolo_gateway.py`; production usage uses `KoloCommandGateway` from `scripts/expenseflow/kolo_command_gateway.py`.
+
+Use `scripts/expenseflow_kolo_cli.py` for Kolo runtime flows:
+
+- `upsert-user`
+- `upsert-settings`
+- `upsert-approval-policy`
+- `upsert-department-policy`
+- `capture-expense`
+- `submit-report`
+- `decide-report`
+- `export-csv`
 
 ## Phase 0 Gate
 
