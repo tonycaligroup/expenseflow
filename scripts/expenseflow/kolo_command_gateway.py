@@ -171,6 +171,15 @@ class KoloCommandGateway:
 def _run_command(command):
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
     if completed.returncode != 0:
+        if _is_record_not_found(command, completed.stdout, completed.stderr):
+            raise ExpenseFlowError(
+                "record_not_found",
+                "Kolo governed record was not found.",
+                details={
+                    "record_type": _command_option(command, "--record-type"),
+                    "external_id": _command_option(command, "--external-id"),
+                },
+            )
         raise ExpenseFlowError(
             "kolo_command_failed",
             f"Kolo command failed: {' '.join(command[:2])}",
@@ -216,3 +225,37 @@ def _normalize_user_id(user_id):
         return int(user_id)
     except (TypeError, ValueError):
         return user_id
+
+
+def _is_record_not_found(command, stdout, stderr):
+    if command[:2] != ["kolo", "record-get"]:
+        return False
+    output = str(stdout or "").strip()
+    if output:
+        try:
+            if _contains_not_found(json.loads(output)):
+                return True
+        except json.JSONDecodeError:
+            pass
+    combined = f"{output}\n{stderr or ''}".lower()
+    return "not_found" in combined or "not found" in combined or "404" in combined
+
+
+def _contains_not_found(value):
+    if isinstance(value, dict):
+        if value.get("status") == 404 or value.get("statusCode") == 404:
+            return True
+        return any(_contains_not_found(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_not_found(item) for item in value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized in {"not_found", "not found"} or "record not found" in normalized
+    return False
+
+
+def _command_option(command, option):
+    try:
+        return command[command.index(option) + 1]
+    except (ValueError, IndexError):
+        return None

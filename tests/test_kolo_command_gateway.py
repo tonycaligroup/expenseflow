@@ -188,6 +188,39 @@ class KoloCommandGatewayTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "kolo_command_failed")
         self.assertTrue(ctx.exception.retryable)
 
+    def test_run_command_maps_nested_record_get_404_to_record_not_found(self):
+        completed = _Completed(
+            returncode=1,
+            stdout='{"detail":{"detail":{"error":"not_found"}},"status":404}',
+            stderr="",
+        )
+        command = [
+            "kolo",
+            "record-get",
+            "--record-type",
+            "skill.user_profile",
+            "--external-id",
+            "272426",
+        ]
+
+        with patch("subprocess.run", return_value=completed):
+            with self.assertRaises(ExpenseFlowError) as ctx:
+                _run_command(command)
+
+        self.assertEqual(ctx.exception.code, "record_not_found")
+        self.assertFalse(ctx.exception.retryable)
+        self.assertEqual(ctx.exception.details["record_type"], "skill.user_profile")
+        self.assertEqual(ctx.exception.details["external_id"], "272426")
+
+    def test_run_command_does_not_hide_non_record_get_404(self):
+        completed = _Completed(returncode=1, stdout='{"error":"not_found","status":404}', stderr="")
+
+        with patch("subprocess.run", return_value=completed):
+            with self.assertRaises(ExpenseFlowError) as ctx:
+                _run_command(["kolo", "record-upsert"])
+
+        self.assertEqual(ctx.exception.code, "kolo_command_failed")
+
 
 class _Completed:
     def __init__(self, returncode, stdout, stderr):
