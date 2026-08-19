@@ -2,13 +2,15 @@ import json
 import subprocess
 
 from .errors import ExpenseFlowError
+from .maton_sheets_gateway import MatonSheetsGateway
 
 
 class KoloCommandGateway:
     """Shell-backed gateway for Kolo platform commands."""
 
-    def __init__(self, runner=None):
+    def __init__(self, runner=None, sheets_gateway=None):
         self.runner = runner or _run_command
+        self.sheets_gateway = sheets_gateway or MatonSheetsGateway()
 
     def upsert_record(self, record_type, external_id, payload, status="active", schema_version=1):
         result = self.runner(
@@ -190,6 +192,18 @@ class KoloCommandGateway:
                 details={"category": category, "idempotency_key": idempotency_key},
             )
         return {"auditEventId": audit_event_id, "raw": result}
+
+    def sheets_get_metadata(self, spreadsheet_id):
+        return self.sheets_gateway.get_metadata(spreadsheet_id)
+
+    def sheets_read_values(self, spreadsheet_id, a1_range):
+        return self.sheets_gateway.read_values(spreadsheet_id, a1_range)
+
+    def sheets_update_values(self, spreadsheet_id, a1_range, values):
+        return self.sheets_gateway.update_values(spreadsheet_id, a1_range, values)
+
+    def sheets_append_values(self, spreadsheet_id, a1_range, values):
+        return self.sheets_gateway.append_values(spreadsheet_id, a1_range, values)
 
 
 def _run_command(command):

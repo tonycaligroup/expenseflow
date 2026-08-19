@@ -6,6 +6,15 @@ from scripts import expenseflow_kolo_cli
 
 
 class ExpenseFlowKoloCliTests(unittest.TestCase):
+    def test_export_sheets_passes_report_id(self):
+        args = SimpleNamespace(report_id="er_1")
+
+        with patch.object(expenseflow_kolo_cli, "export_approved_report_sheets", return_value={"ok": True}) as export:
+            result = expenseflow_kolo_cli.cmd_export_sheets(args, gateway=object())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(export.call_args.args[1], "er_1")
+
     def test_decide_report_casts_approver_user_id_to_int(self):
         args = SimpleNamespace(
             approval_request_id="ar_1",

@@ -45,7 +45,11 @@ credentials, tax identities, or banking information.
 ## Exports And Integrations
 
 - Export only approved reports.
-- Escape spreadsheet formula prefixes in all user-controlled CSV and Sheets cells.
+- Escape spreadsheet formula prefixes in CSV. Write Google Sheets values with
+  `valueInputOption=RAW` so user-controlled text cannot execute as a formula.
+- Never persist or log Maton, Google, or accounting integration credentials.
+- Export receipt object references only. Omit staged local receipt paths even
+  when they appear on legacy expense records.
 - Store integration object IDs and posting results, not access credentials.
 - Preview accounting payloads before posting. QuickBooks writes require the
   platform's approval-gated write path.

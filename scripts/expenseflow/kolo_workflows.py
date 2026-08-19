@@ -18,6 +18,17 @@ from .reminder_engine import (
     parse_utc,
 )
 from .report_engine import create_report, transition_report
+from .sheets_export import (
+    SHEET_COLUMNS,
+    build_sheet_row,
+    content_hash,
+    data_range,
+    header_range,
+    index_rows_by_id,
+    normalized_values,
+    parse_updated_range,
+    row_range,
+)
 from .status import validate_transition
 
 
@@ -35,6 +46,8 @@ APPROVAL_DELEGATION = "skill.approval_delegation"
 APPROVER_SNAPSHOT = "skill.approver_snapshot"
 IDENTITY_DISCOVERY = "skill.identity_discovery"
 NOTIFICATION_EVENT = "skill.notification_event"
+EXPORT_RUN = "skill.export_run"
+EXPORT_ITEM = "skill.export_item"
 
 
 def upsert_user_profile(gateway, profile):
@@ -81,13 +94,24 @@ def _accounting_destination_payload(org_id, destination):
             "invalid_accounting_destination",
             "Destination type must be csv, sheets, or qbo.",
         )
-    config = destination.get("config") or {}
+    config = dict(destination.get("config") or {})
     if destination_type == "csv":
         delivery_method = config.get("delivery_method", "message")
         if delivery_method not in {"message", "drive", "gmail"}:
             raise ExpenseFlowError("invalid_delivery_method", "CSV delivery must use message, drive, or gmail.")
-    elif destination_type == "sheets" and not config.get("spreadsheet_id"):
-        raise ExpenseFlowError("missing_spreadsheet_id", "Google Sheets destination requires spreadsheet_id.")
+    elif destination_type == "sheets":
+        if not config.get("spreadsheet_id"):
+            raise ExpenseFlowError("missing_spreadsheet_id", "Google Sheets destination requires spreadsheet_id.")
+        config["sheet_name"] = str(config.get("sheet_name") or "ExpenseFlow").strip()
+        if not config["sheet_name"]:
+            raise ExpenseFlowError("missing_sheet_name", "Google Sheets destination requires sheet_name.")
+        fallback_to_csv = config.get("fallback_to_csv", False)
+        if not isinstance(fallback_to_csv, bool):
+            raise ExpenseFlowError(
+                "invalid_csv_fallback",
+                "Google Sheets fallback_to_csv must be true or false.",
+            )
+        config["fallback_to_csv"] = fallback_to_csv
     elif destination_type == "qbo" and not config.get("company_id"):
         raise ExpenseFlowError("missing_qbo_company_id", "QuickBooks destination requires company_id.")
     payload = {
@@ -873,6 +897,375 @@ def export_approved_report_csv(gateway, report_id):
         {"report_id": report_id},
     )
     return {"status": "ok", "report": exported_report, "csv": csv_content}
+
+
+def export_approved_report_sheets(gateway, report_id):
+    report = _payload(gateway.get_record(EXPENSE_REPORT, report_id))
+    org_id = str(report.get("org_id") or "default")
+    destination = _payload(gateway.get_record(ACCOUNTING_DESTINATION, org_id))
+    if destination.get("status") != "active" or destination.get("destination_type") != "sheets":
+        raise ExpenseFlowError(
+            "sheets_destination_not_active",
+            "The organization does not have an active Google Sheets destination.",
+        )
+    config = destination.get("config") or {}
+    try:
+        return _export_approved_report_sheets(gateway, report, destination)
+    except ExpenseFlowError as exc:
+        if not config.get("fallback_to_csv") or not exc.code.startswith("sheets_"):
+            raise
+        items = [
+            _payload(record)
+            for record in gateway.list_records(EXPORT_ITEM)
+            if _payload(record).get("report_id") == report_id
+        ]
+        unsafe_statuses = {"appended", "confirmed", "unknown"}
+        if any(item.get("status") in unsafe_statuses for item in items):
+            raise
+        expenses = [_payload(gateway.get_record(EXPENSE, expense_id)) for expense_id in report.get("expense_ids", [])]
+        return {
+            "status": "fallback_ready",
+            "destination": "csv",
+            "sheets_error": exc.to_dict(),
+            "csv": generate_report_csv(report, expenses),
+            "report": report,
+        }
+
+
+def _export_approved_report_sheets(gateway, report, destination):
+    if report.get("status") not in {"approved", "exported"}:
+        raise ExpenseFlowError(
+            "report_not_approved",
+            "Only approved reports can be exported.",
+            details={"report_id": report.get("report_id"), "status": report.get("status")},
+        )
+    org_id = str(report.get("org_id") or destination.get("org_id") or "default")
+    config = destination.get("config") or {}
+    spreadsheet_id = str(config.get("spreadsheet_id") or "")
+    sheet_name = str(config.get("sheet_name") or "ExpenseFlow")
+    run_id = f"sheets:{org_id}:{spreadsheet_id}:{report['report_id']}"
+    existing_run = _optional_payload(gateway, EXPORT_RUN, run_id)
+    if existing_run is not None and existing_run.get("status") == "complete":
+        return {
+            "status": "already_exported",
+            "report": report,
+            "export_run": existing_run,
+            "items": _report_export_items(gateway, report["report_id"]),
+        }
+
+    expenses = [_payload(gateway.get_record(EXPENSE, expense_id)) for expense_id in report.get("expense_ids", [])]
+    if not expenses:
+        raise ExpenseFlowError("empty_export", "At least one expense is required for Google Sheets export.")
+    if report.get("status") == "exported" and existing_run is None:
+        raise ExpenseFlowError(
+            "incomplete_export_state",
+            "The report is exported but its Google Sheets export run is not complete.",
+            details={"run_id": run_id},
+        )
+    rows = {
+        expense["expense_id"]: build_sheet_row(report, expense, org_id, spreadsheet_id)
+        for expense in expenses
+    }
+    metadata = gateway.sheets_get_metadata(spreadsheet_id)
+    sheet_id, sheet_name = _resolve_sheet(metadata, config, existing_run)
+    _ensure_sheet_headers(gateway, spreadsheet_id, sheet_name)
+
+    if existing_run is not None:
+        existing_run = dict(existing_run)
+        existing_run["current_sheet_name"] = sheet_name
+        return _reconcile_sheets_export(
+            gateway,
+            report,
+            expenses,
+            rows,
+            existing_run,
+            spreadsheet_id,
+            sheet_name,
+        )
+
+    run = {
+        "export_run_id": run_id,
+        "org_id": org_id,
+        "report_id": report["report_id"],
+        "destination_type": "sheets",
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_id": sheet_id,
+        "sheet_name_at_export": sheet_name,
+        "status": "in_progress",
+        "claim_basis_at": report.get("approved_at") or report.get("created_at"),
+        "schema_version": 1,
+    }
+    claimed = gateway.upsert_record(EXPORT_RUN, run_id, run, "in_progress")
+    if not claimed.get("created", False):
+        raise ExpenseFlowError(
+            "sheets_export_already_claimed",
+            "Another ExpenseFlow invocation claimed this report export. Retry to reconcile it.",
+            retryable=True,
+            details={"export_run_id": run_id},
+        )
+
+    for expense in expenses:
+        _reserve_export_item(gateway, run, expense, rows[expense["expense_id"]])
+
+    existing_rows = _read_indexed_rows(gateway, spreadsheet_id, sheet_name)
+    confirmed_items = []
+    for expense in expenses:
+        expected = rows[expense["expense_id"]]
+        row_id = expected[-1]
+        matches = existing_rows.get(row_id, [])
+        if len(matches) > 1:
+            _mark_export_item_failed(gateway, run, expense, expected, "duplicate_sheet_row_id")
+            raise ExpenseFlowError(
+                "duplicate_sheet_row_id",
+                "The spreadsheet contains duplicate ExpenseFlow row IDs.",
+                details={"expense_id": expense["expense_id"], "row_id": row_id},
+            )
+        if matches:
+            row_number = matches[0]["row_number"]
+            if matches[0]["values"] != expected:
+                gateway.sheets_update_values(spreadsheet_id, row_range(sheet_name, row_number), [expected])
+            confirmed_items.append(
+                _confirm_export_item(gateway, run, expense, expected, row_number, "reconciled")
+            )
+            continue
+        confirmed_items.append(
+            _append_and_confirm_sheet_row(gateway, run, expense, expected, spreadsheet_id, sheet_name)
+        )
+
+    return _complete_sheets_export(gateway, report, expenses, run, confirmed_items)
+
+
+def _ensure_sheet_headers(gateway, spreadsheet_id, sheet_name):
+    response = gateway.sheets_read_values(spreadsheet_id, header_range(sheet_name))
+    rows = normalized_values(response, len(SHEET_COLUMNS))
+    if not rows or not any(rows[0]):
+        gateway.sheets_update_values(spreadsheet_id, header_range(sheet_name), [SHEET_COLUMNS])
+        return
+    if rows[0] != SHEET_COLUMNS:
+        raise ExpenseFlowError(
+            "sheets_header_mismatch",
+            "The configured sheet does not have the ExpenseFlow column layout.",
+            details={"expected": SHEET_COLUMNS, "actual": rows[0]},
+        )
+
+
+def _find_sheet_id(metadata, sheet_name):
+    for sheet in metadata.get("sheets", []):
+        properties = sheet.get("properties", {})
+        if properties.get("title") == sheet_name:
+            return properties.get("sheetId")
+    raise ExpenseFlowError(
+        "sheet_tab_not_found",
+        "The configured Google Sheets tab was not found.",
+        details={"sheet_name": sheet_name},
+    )
+
+
+def _resolve_sheet(metadata, config, existing_run=None):
+    expected_sheet_id = None
+    if existing_run is not None:
+        expected_sheet_id = existing_run.get("sheet_id")
+    if expected_sheet_id is None:
+        expected_sheet_id = config.get("sheet_id")
+    if expected_sheet_id is not None:
+        for sheet in metadata.get("sheets", []):
+            properties = sheet.get("properties", {})
+            if str(properties.get("sheetId")) == str(expected_sheet_id):
+                return properties.get("sheetId"), properties.get("title")
+        raise ExpenseFlowError(
+            "sheet_tab_not_found",
+            "The configured Google Sheets tab ID was not found.",
+            details={"sheet_id": expected_sheet_id},
+        )
+    sheet_name = str(config.get("sheet_name") or "ExpenseFlow")
+    return _find_sheet_id(metadata, sheet_name), sheet_name
+
+
+def _read_indexed_rows(gateway, spreadsheet_id, sheet_name):
+    response = gateway.sheets_read_values(spreadsheet_id, data_range(sheet_name))
+    return index_rows_by_id(normalized_values(response, len(SHEET_COLUMNS)))
+
+
+def _reserve_export_item(gateway, run, expense, expected):
+    item_id = f"{run['export_run_id']}:{expense['expense_id']}"
+    existing = _optional_payload(gateway, EXPORT_ITEM, item_id)
+    if existing is not None:
+        return existing
+    item = {
+        "export_item_id": item_id,
+        "export_run_id": run["export_run_id"],
+        "org_id": run["org_id"],
+        "report_id": run["report_id"],
+        "expense_id": expense["expense_id"],
+        "destination_type": "sheets",
+        "spreadsheet_id": run["spreadsheet_id"],
+        "sheet_id": run["sheet_id"],
+        "expenseflow_row_id": expected[-1],
+        "content_hash": content_hash(expected),
+        "status": "reserved",
+        "reserved_at": utc_now(),
+        "schema_version": 1,
+    }
+    result = gateway.upsert_record(EXPORT_ITEM, item_id, item, "reserved")
+    if not result.get("created", False):
+        raise ExpenseFlowError(
+            "export_item_claim_conflict",
+            "Another invocation reserved an expense export row.",
+            retryable=True,
+            details={"export_item_id": item_id},
+        )
+    return item
+
+
+def _append_and_confirm_sheet_row(gateway, run, expense, expected, spreadsheet_id, sheet_name):
+    item_id = f"{run['export_run_id']}:{expense['expense_id']}"
+    try:
+        response = gateway.sheets_append_values(spreadsheet_id, header_range(sheet_name), [expected])
+    except ExpenseFlowError as exc:
+        status = "failed" if exc.code in {
+            "sheets_invalid_request",
+            "sheets_unauthenticated",
+            "sheets_permission_denied",
+            "sheets_not_found",
+        } else "unknown"
+        item = _payload(gateway.get_record(EXPORT_ITEM, item_id))
+        item["status"] = status
+        item["error_code"] = exc.code
+        item["completed_at"] = utc_now()
+        gateway.upsert_record(EXPORT_ITEM, item_id, item, status)
+        raise
+    try:
+        row_number = parse_updated_range(response.get("updates", {}).get("updatedRange"), sheet_name)
+    except ExpenseFlowError as exc:
+        item = _payload(gateway.get_record(EXPORT_ITEM, item_id))
+        item["status"] = "unknown"
+        item["error_code"] = exc.code
+        item["completed_at"] = utc_now()
+        gateway.upsert_record(EXPORT_ITEM, item_id, item, "unknown")
+        raise
+    item = _payload(gateway.get_record(EXPORT_ITEM, item_id))
+    item["status"] = "appended"
+    item["destination_row"] = row_number
+    item["destination_range"] = row_range(sheet_name, row_number)
+    item["appended_at"] = utc_now()
+    gateway.upsert_record(EXPORT_ITEM, item_id, item, "appended")
+    readback = normalized_values(
+        gateway.sheets_read_values(spreadsheet_id, item["destination_range"]),
+        len(SHEET_COLUMNS),
+    )
+    if len(readback) != 1 or readback[0] != expected:
+        raise ExpenseFlowError(
+            "sheets_readback_mismatch",
+            "The appended Google Sheets row could not be confirmed.",
+            details={"expense_id": expense["expense_id"], "destination_range": item["destination_range"]},
+        )
+    return _confirm_export_item(gateway, run, expense, expected, row_number, "appended")
+
+
+def _confirm_export_item(gateway, run, expense, expected, row_number, confirmation_source):
+    item_id = f"{run['export_run_id']}:{expense['expense_id']}"
+    item = _payload(gateway.get_record(EXPORT_ITEM, item_id))
+    item.update(
+        {
+            "status": "confirmed",
+            "content_hash": content_hash(expected),
+            "destination_row": row_number,
+            "destination_range": row_range(
+                run.get("current_sheet_name") or run["sheet_name_at_export"],
+                row_number,
+            ),
+            "confirmation_source": confirmation_source,
+            "confirmed_at": utc_now(),
+        }
+    )
+    gateway.upsert_record(EXPORT_ITEM, item_id, item, "confirmed")
+    return item
+
+
+def _mark_export_item_failed(gateway, run, expense, expected, error_code):
+    item_id = f"{run['export_run_id']}:{expense['expense_id']}"
+    item = _optional_payload(gateway, EXPORT_ITEM, item_id) or _reserve_export_item(gateway, run, expense, expected)
+    item["status"] = "failed"
+    item["error_code"] = error_code
+    item["completed_at"] = utc_now()
+    gateway.upsert_record(EXPORT_ITEM, item_id, item, "failed")
+
+
+def _reconcile_sheets_export(gateway, report, expenses, rows, run, spreadsheet_id, sheet_name):
+    existing_rows = _read_indexed_rows(gateway, spreadsheet_id, sheet_name)
+    confirmed = []
+    missing = []
+    for expense in expenses:
+        expected = rows[expense["expense_id"]]
+        matches = existing_rows.get(expected[-1], [])
+        if len(matches) > 1:
+            raise ExpenseFlowError(
+                "duplicate_sheet_row_id",
+                "The spreadsheet contains duplicate ExpenseFlow row IDs.",
+                details={"expense_id": expense["expense_id"], "row_id": expected[-1]},
+            )
+        if not matches:
+            missing.append(expense["expense_id"])
+            continue
+        if matches[0]["values"] != expected:
+            raise ExpenseFlowError(
+                "sheets_reconciliation_mismatch",
+                "An existing ExpenseFlow row does not match its approved expense.",
+                details={"expense_id": expense["expense_id"], "row_number": matches[0]["row_number"]},
+            )
+        if _optional_payload(gateway, EXPORT_ITEM, f"{run['export_run_id']}:{expense['expense_id']}") is None:
+            _reserve_export_item(gateway, run, expense, expected)
+        confirmed.append(
+            _confirm_export_item(gateway, run, expense, expected, matches[0]["row_number"], "reconciled")
+        )
+    if missing:
+        raise ExpenseFlowError(
+            "sheets_export_incomplete",
+            "A prior export claim is incomplete. Missing rows were not appended again to avoid duplicates.",
+            details={"export_run_id": run["export_run_id"], "missing_expense_ids": missing},
+        )
+    return _complete_sheets_export(gateway, report, expenses, run, confirmed)
+
+
+def _complete_sheets_export(gateway, report, expenses, run, confirmed_items):
+    exported_report = report if report.get("status") == "exported" else transition_report(report, "exported")
+    if report.get("status") != "exported":
+        gateway.upsert_record(EXPENSE_REPORT, report["report_id"], exported_report, "exported")
+    for expense in expenses:
+        if expense.get("status") != "exported":
+            exported_expense = _transition_expense(expense, "exported")
+            gateway.upsert_record(EXPENSE, exported_expense["expense_id"], exported_expense, "exported")
+    completed_run = dict(run)
+    completed_run["status"] = "complete"
+    completed_run["completed_at"] = utc_now()
+    completed_run["confirmed_item_count"] = len(confirmed_items)
+    gateway.upsert_record(EXPORT_RUN, run["export_run_id"], completed_run, "complete")
+    gateway.log_action(
+        "skill.expense_report",
+        "Expense report exported to Google Sheets",
+        f"expenseflow:export-sheets:{report['report_id']}:{run['spreadsheet_id']}",
+        {
+            "report_id": report["report_id"],
+            "spreadsheet_id": run["spreadsheet_id"],
+            "sheet_id": run["sheet_id"],
+            "confirmed_item_count": len(confirmed_items),
+        },
+    )
+    return {
+        "status": "ok",
+        "destination": "sheets",
+        "report": exported_report,
+        "export_run": completed_run,
+        "items": confirmed_items,
+    }
+
+
+def _report_export_items(gateway, report_id):
+    return [
+        _payload(record)
+        for record in gateway.list_records(EXPORT_ITEM)
+        if _payload(record).get("report_id") == report_id
+    ]
 
 
 def _load_policies(gateway, org_id):

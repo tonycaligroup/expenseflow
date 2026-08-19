@@ -21,6 +21,15 @@ class ScriptedRunner:
 
 
 class KoloCommandGatewayTests(unittest.TestCase):
+    def test_sheets_calls_delegate_to_narrow_adapter(self):
+        sheets = _SheetsGateway()
+        gateway = KoloCommandGateway(runner=ScriptedRunner([]), sheets_gateway=sheets)
+
+        result = gateway.sheets_append_values("sheet_1", "ExpenseFlow!A1:O1", [["row"]])
+
+        self.assertEqual(result, {"updates": {"updatedRange": "ExpenseFlow!A2:O2"}})
+        self.assertEqual(sheets.calls, [("append", "sheet_1", "ExpenseFlow!A1:O1", [["row"]])])
+
     def test_upsert_record_calls_kolo_and_sets_status_when_needed(self):
         runner = ScriptedRunner(
             [
@@ -260,6 +269,15 @@ class KoloCommandGatewayTests(unittest.TestCase):
                 _run_command(["kolo", "record-upsert"])
 
         self.assertEqual(ctx.exception.code, "kolo_command_failed")
+
+
+class _SheetsGateway:
+    def __init__(self):
+        self.calls = []
+
+    def append_values(self, spreadsheet_id, a1_range, values):
+        self.calls.append(("append", spreadsheet_id, a1_range, values))
+        return {"updates": {"updatedRange": "ExpenseFlow!A2:O2"}}
 
 
 class _Completed:

@@ -14,6 +14,7 @@ from expenseflow.kolo_workflows import (
     configure_organization,
     decide_report_approval,
     export_approved_report_csv,
+    export_approved_report_sheets,
     map_sender_identity,
     reconcile_user_directory,
     send_due_approval_reminders,
@@ -178,6 +179,10 @@ def cmd_export_csv(args, gateway):
     return _ok(result=export_approved_report_csv(gateway, args.report_id))
 
 
+def cmd_export_sheets(args, gateway):
+    return _ok(result=export_approved_report_sheets(gateway, args.report_id))
+
+
 def cmd_attach_receipt(args, gateway):
     return _ok(
         result=attach_receipt_reference(
@@ -299,6 +304,10 @@ def main(argv=None):
     cmd = sub.add_parser("export-csv")
     cmd.add_argument("--report-id", required=True)
     cmd.set_defaults(func=cmd_export_csv)
+
+    cmd = sub.add_parser("export-sheets")
+    cmd.add_argument("--report-id", required=True)
+    cmd.set_defaults(func=cmd_export_sheets)
 
     cmd = sub.add_parser("attach-receipt")
     cmd.add_argument("--expense-id", required=True)

@@ -37,7 +37,10 @@ Deterministic code lives under `scripts/expenseflow/`. Use `scripts/expenseflow_
 python3 -m unittest discover -s tests -v
 ```
 
-Current deterministic modules include expense and receipt validation, money math, duplicate detection, status transitions, approver routing, bounded approval reminders, approval decision handling, report creation, and CSV export generation.
+Current deterministic modules include expense and receipt validation, money math,
+duplicate detection, status transitions, approver routing, bounded approval
+reminders, approval decision handling, report creation, CSV generation, and
+Google Sheets row/idempotency handling.
 
 Kolo platform wiring lives in `scripts/expenseflow/kolo_workflows.py`. It must call deterministic core modules for business rules, then persist results through a narrow gateway interface. Tests use `FakeKoloGateway` from `scripts/expenseflow/kolo_gateway.py`; production usage uses `KoloCommandGateway` from `scripts/expenseflow/kolo_command_gateway.py`.
 
@@ -62,6 +65,7 @@ Use `scripts/expenseflow_kolo_cli.py` for Kolo runtime flows:
 - `upload-receipt`
 - `send-reminders`
 - `export-csv`
+- `export-sheets`
 
 ## Phase 0 Gate
 
@@ -98,6 +102,8 @@ Core record types:
 - `skill.approval_decision`
 - `skill.approver_snapshot`
 - `skill.notification_event`
+- `skill.export_run`
+- `skill.export_item`
 
 Use UTC ISO-8601 timestamps for instants. Store date-only business fields, such as expense date and due date, separately.
 
@@ -333,7 +339,44 @@ CSV export is the first end-to-end adapter. A report and all included expenses m
 
 For implementation, call `export_approved_report_csv(...)` from `kolo_workflows.py`. It generates CSV, marks the report and expenses `exported`, and logs an idempotent audit event. Delivery of the CSV file/message remains a platform adapter responsibility until the Kolo media delivery shape is fully verified.
 
-Google Sheets exports append deterministic rows to a configured sheet. Track export status at both report and expense row level.
+Google Sheets exports use Kolo's authenticated Maton route to the Google Sheets
+v4 API. Configure `spreadsheet_id`, `sheet_name`, optional immutable `sheet_id`,
+and optional boolean `fallback_to_csv` on `skill.accounting_destination`.
+
+The destination tab must be empty or have the exact ExpenseFlow headers. The
+adapter writes with `valueInputOption=RAW`, uses a deterministic
+`expenseflow_row_id` column, and scans that column before any append. Treat the
+row ID as authoritative; stored row numbers and A1 ranges are only location
+hints because users can reorder or delete rows.
+
+Before writing an expense row, create `skill.export_item` as `reserved`. Move it
+through `appended` to `confirmed` only after readback matches the approved
+expense. Use `unknown` when an append may have succeeded but returned no usable
+response. Never repeat an `unknown` append automatically. A report and its
+expenses move to `exported` only after every item is `confirmed`.
+
+Kolo governed records do not expose create-only, compare-and-set, ETags, or an
+atomic lease. Use the deterministic `skill.export_run` key as a permanent
+single-flight claim for one report and destination: only the invocation whose
+upsert returns `created: true` may append. A later invocation may reconcile rows
+that are already present, but it must fail closed when a claimed row is missing.
+Do not implement automatic lock expiry or takeover until Kolo provides a
+verified conditional-write primitive.
+
+Reads may retry bounded 429 and 5xx failures. Appends and row updates must not
+retry after an inconclusive response. If `fallback_to_csv` is enabled, return a
+CSV fallback only when no item is `appended`, `confirmed`, or `unknown`; do not
+silently mix a partial Sheets export with CSV.
+
+Run an approved report export with:
+
+```bash
+PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py \
+  --org-id <org_id> export-sheets --report-id <report_id>
+```
+
+The verified platform behavior and remaining concurrency limitation are in
+[google-sheets-platform-verification.md](references/google-sheets-platform-verification.md).
 
 QBO sync requires:
 
