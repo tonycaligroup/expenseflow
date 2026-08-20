@@ -1,4 +1,7 @@
+import json
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -6,6 +9,133 @@ from scripts import expenseflow_kolo_cli
 
 
 class ExpenseFlowKoloCliTests(unittest.TestCase):
+    def test_compact_response_keeps_actionable_fields_and_omits_record_detail(self):
+        payload = {
+            "status": "ok",
+            "expense": {
+                "expense_id": "exp_1",
+                "status": "draft",
+                "merchant_name": "Cafe",
+                "amount": "12.50",
+                "currency": "USD",
+                "duplicate_candidates": ["exp_old"],
+                "receipt_attachments": [{"object_store_object_id": "secret_detail"}],
+                "internal_trace": "large diagnostic value",
+            },
+        }
+
+        compact = expenseflow_kolo_cli.compact_cli_response(payload, "capture-expense")
+
+        self.assertEqual(compact["expense"]["expense_id"], "exp_1")
+        self.assertEqual(compact["expense"]["merchant_name"], "Cafe")
+        self.assertNotIn("receipt_attachments", compact["expense"])
+        self.assertNotIn("internal_trace", compact["expense"])
+
+    def test_compact_readiness_keeps_only_checks_needing_attention(self):
+        payload = {
+            "status": "ok",
+            "result": {
+                "status": "not_ready",
+                "can_launch_pilot": False,
+                "summary": {"blocker_count": 1, "warning_count": 1, "pass_count": 8},
+                "checks": [
+                    {"id": "org", "status": "pass", "message": "Organization is configured."},
+                    {
+                        "id": "destination",
+                        "status": "blocker",
+                        "message": "Destination is missing.",
+                        "next_action": "Configure a destination.",
+                    },
+                ],
+                "next_action": "Configure a destination.",
+            },
+        }
+
+        compact = expenseflow_kolo_cli.compact_cli_response(payload, "setup-readiness")
+
+        self.assertEqual(compact["result"]["summary"]["pass_count"], 8)
+        self.assertEqual(len(compact["result"]["checks"]), 1)
+        self.assertEqual(compact["result"]["checks"][0]["status"], "blocker")
+
+    def test_main_verbose_preserves_complete_workflow_result(self):
+        workflow_result = {
+            "expense_id": "exp_1",
+            "status": "draft",
+            "internal_trace": "diagnostic detail",
+        }
+        output = StringIO()
+        with (
+            patch.object(expenseflow_kolo_cli, "KoloCommandGateway", return_value=object()),
+            patch.object(expenseflow_kolo_cli, "capture_expense", return_value=workflow_result),
+            redirect_stdout(output),
+        ):
+            exit_code = expenseflow_kolo_cli.main(
+                [
+                    "--org-id",
+                    "org_1",
+                    "--verbose",
+                    "capture-expense",
+                    "--submitter-user-id",
+                    "1",
+                    "--expense",
+                    "{}",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(output.getvalue())["expense"]["internal_trace"], "diagnostic detail")
+
+    def test_csv_content_is_preserved_in_compact_export_output(self):
+        payload = {
+            "status": "ok",
+            "result": {
+                "status": "ok",
+                "report": {"report_id": "er_1", "status": "exported", "private": "omit"},
+                "csv": "expense_id,amount\nexp_1,12.50\n",
+            },
+        }
+
+        compact = expenseflow_kolo_cli.compact_cli_response(payload, "export-csv")
+
+        self.assertEqual(compact["result"]["csv"], payload["result"]["csv"])
+        self.assertNotIn("private", compact["result"]["report"])
+
+    def test_compact_export_summarizes_successful_items(self):
+        payload = {
+            "status": "ok",
+            "result": {
+                "status": "ok",
+                "items": [
+                    {"export_item_id": "item_1", "status": "confirmed", "row_payload": ["large"]},
+                    {"export_item_id": "item_2", "status": "unknown", "error_code": "write_unknown"},
+                ],
+            },
+        }
+
+        compact = expenseflow_kolo_cli.compact_cli_response(payload, "export-sheets")["result"]
+
+        self.assertEqual(compact["item_count"], 2)
+        self.assertEqual(compact["item_status_counts"], {"confirmed": 1, "unknown": 1})
+        self.assertEqual(compact["items"], [{"export_item_id": "item_2", "status": "unknown", "error_code": "write_unknown"}])
+
+    def test_compact_response_bounds_large_id_lists(self):
+        payload = {
+            "status": "ok",
+            "result": {
+                "report": {
+                    "report_id": "er_1",
+                    "expense_ids": [f"exp_{index}" for index in range(25)],
+                    "totals": {"USD": "250.00"},
+                }
+            },
+        }
+
+        report = expenseflow_kolo_cli.compact_cli_response(payload, "submit-report")["result"]["report"]
+
+        self.assertEqual(len(report["expense_ids"]), 10)
+        self.assertEqual(report["expense_ids_count"], 25)
+        self.assertEqual(report["totals"], {"USD": "250.00"})
+
     def test_export_sheets_passes_report_id(self):
         args = SimpleNamespace(report_id="er_1")
 

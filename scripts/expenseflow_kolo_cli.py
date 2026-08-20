@@ -46,6 +46,137 @@ def _ok(**payload):
     return {"status": "ok", **payload}
 
 
+_COMPACT_SCALAR_FIELDS = {
+    "status",
+    "destination",
+    "decision",
+    "next_action",
+    "can_launch_pilot",
+    "onboarding_required",
+    "idempotent_replay",
+    "retryable",
+    "created",
+    "environment",
+    "record_type",
+    "scanned",
+    "attempt",
+    "max_attempts",
+    "display_name",
+    "email",
+    "merchant",
+    "merchant_name",
+    "vendor",
+    "expense_date",
+    "amount",
+    "currency",
+    "category",
+    "description",
+    "title",
+    "routing_reason",
+    "receipt_required",
+    "brief_number",
+    "confirmed_item_count",
+    "execution_check_count",
+    "error_code",
+    "message",
+}
+
+_COMPACT_LIST_FIELDS = {
+    "warnings",
+    "policy_warnings",
+    "duplicate_candidates",
+    "mapped_expense_ids",
+    "released_expense_ids",
+    "admin_notification_queue_ids",
+    "sent",
+    "delivery_unknown",
+    "skipped",
+    "escalated",
+}
+
+_COMPACT_OBJECT_FIELDS = {
+    "result",
+    "expense",
+    "report",
+    "approval_request",
+    "approval_decision",
+    "communication",
+    "export_run",
+    "receipt",
+    "user_profile",
+    "summary",
+    "sheets_error",
+    "record",
+    "settings",
+    "approval_policy",
+    "accounting_destination",
+    "routing",
+    "approval_decision_claim",
+}
+
+_COMPACT_LIST_LIMIT = 10
+
+
+def compact_cli_response(payload, command=None):
+    """Return a small, deterministic runtime view of a successful response."""
+    return _compact_mapping(payload, include_csv=command in {"export-csv", "export-sheets"})
+
+
+def _compact_mapping(payload, include_csv=False):
+    compact = {}
+    for key, value in payload.items():
+        if key == "checks" and isinstance(value, list):
+            attention = [
+                _compact_mapping(check, include_csv=include_csv)
+                for check in value
+                if isinstance(check, dict) and check.get("status") != "pass"
+            ]
+            if attention:
+                compact[key] = attention
+        elif key == "items" and isinstance(value, list):
+            compact["item_count"] = len(value)
+            status_counts = {}
+            for item in value:
+                status = item.get("status", "unknown") if isinstance(item, dict) else "unknown"
+                status_counts[status] = status_counts.get(status, 0) + 1
+            compact["item_status_counts"] = status_counts
+            attention = [
+                _compact_mapping(item, include_csv=include_csv) if isinstance(item, dict) else item
+                for item in value
+                if not isinstance(item, dict) or item.get("status") not in {"confirmed", "complete", "ok"}
+            ]
+            if attention:
+                compact[key] = attention[:_COMPACT_LIST_LIMIT]
+                if len(attention) > _COMPACT_LIST_LIMIT:
+                    compact["attention_item_count"] = len(attention)
+        elif key in {"summary", "totals", "period"} and isinstance(value, dict):
+            compact[key] = value
+        elif key == "references" and isinstance(value, dict):
+            compact["reference_counts"] = {
+                name: len(rows) if isinstance(rows, list) else 0 for name, rows in value.items()
+            }
+        elif key in _COMPACT_OBJECT_FIELDS and isinstance(value, dict):
+            compact[key] = _compact_mapping(value, include_csv=include_csv)
+        elif key in _COMPACT_LIST_FIELDS and isinstance(value, list):
+            compact[key] = value[:_COMPACT_LIST_LIMIT]
+            if len(value) > _COMPACT_LIST_LIMIT:
+                compact[f"{key}_count"] = len(value)
+        elif key.endswith("_ids") and isinstance(value, list):
+            compact[key] = value[:_COMPACT_LIST_LIMIT]
+            if len(value) > _COMPACT_LIST_LIMIT:
+                compact[f"{key}_count"] = len(value)
+        elif (
+            key in _COMPACT_SCALAR_FIELDS
+            or key == "id"
+            or key.endswith("_id")
+            or key.endswith("_count")
+        ):
+            compact[key] = value
+        elif key == "csv" and include_csv:
+            compact[key] = value
+    return compact
+
+
 def cmd_upsert_user(args, gateway):
     return _ok(result=upsert_user_profile(gateway, _load_json(args.profile)))
 
@@ -289,6 +420,11 @@ def cmd_send_reminders(args, gateway):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ExpenseFlow Kolo runtime CLI")
     parser.add_argument("--org-id", default="default")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print complete workflow records instead of the compact runtime response.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     cmd = sub.add_parser("upsert-user")
@@ -439,7 +575,8 @@ def main(argv=None):
     except ExpenseFlowError as exc:
         print(json.dumps(exc.to_dict(), indent=2, sort_keys=True))
         return 1
-    print(json.dumps(result, indent=2, sort_keys=True))
+    output = result if args.verbose else compact_cli_response(result, args.command)
+    print(json.dumps(output, indent=2, sort_keys=True))
     return 0
 
 
