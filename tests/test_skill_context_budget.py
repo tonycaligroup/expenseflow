@@ -29,6 +29,8 @@ class SkillContextBudgetTests(unittest.TestCase):
         self.assertIn("Run one packaged deterministic command per requested step", skill)
         self.assertIn("stop at the user's boundary", skill)
         self.assertIn("discover-org", skill)
+        self.assertIn("PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py", skill)
+        self.assertIn("Never invent a `kolo expenseflow` command", skill)
 
 
 if __name__ == "__main__":

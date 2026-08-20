@@ -43,6 +43,14 @@ Use the Kolo runtime CLI for production workflows. Command groups are:
 - Reports: `submit-report`, `decide-report-from-sender`, `reconcile-approval-decision`, `send-reminders`.
 - Accounting: `export-csv`, `export-sheets`, `qbo-refresh-cache`, `sync-qbo`.
 
+Invoke every runtime command through the packaged Python entry point:
+
+```bash
+PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py [--org-id <org_uuid>] <command> [arguments]
+```
+
+For example, organization discovery is exactly `PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py discover-org`. Never invent a `kolo expenseflow` command; it does not exist.
+
 Use `scripts/expenseflow_cli.py` only for local JSON validation and orchestration. Kolo wiring lives in `scripts/expenseflow/kolo_workflows.py`; business rules live in deterministic modules under `scripts/expenseflow/`.
 
 ## Trust Boundaries
