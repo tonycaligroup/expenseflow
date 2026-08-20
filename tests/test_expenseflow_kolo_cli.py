@@ -70,6 +70,28 @@ class ExpenseFlowKoloCliTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(decide.call_args.args[2], 272086)
 
+    def test_inbound_decision_passes_sender_and_correlation(self):
+        args = SimpleNamespace(
+            sender_id="sender-uuid",
+            decision="approved",
+            org_id="org_1",
+            approval_request_id="ar_1",
+            queue_id="queue_1",
+            note=None,
+            decision_id=None,
+        )
+
+        with patch.object(
+            expenseflow_kolo_cli,
+            "decide_report_approval_from_sender",
+            return_value={"ok": True},
+        ) as decide:
+            result = expenseflow_kolo_cli.cmd_decide_report_from_sender(args, gateway=object())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(decide.call_args.args[1:4], ("sender-uuid", "approved", "org_1"))
+        self.assertEqual(decide.call_args.kwargs["approval_request_id"], "ar_1")
+
     def test_attach_receipt_casts_actor_and_loads_attachment(self):
         args = SimpleNamespace(
             expense_id="exp_1",

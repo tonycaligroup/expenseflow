@@ -62,11 +62,14 @@ Use `scripts/expenseflow_kolo_cli.py` for Kolo runtime flows:
 - `acknowledge-policy`
 - `submit-report`
 - `decide-report`
+- `decide-report-from-sender`
 - `attach-receipt`
 - `upload-receipt`
 - `send-reminders`
 - `export-csv`
 - `export-sheets`
+- `qbo-refresh-cache`
+- `sync-qbo`
 
 ## Phase 0 Gate
 
@@ -101,8 +104,10 @@ Core record types:
 - `skill.expense_report`
 - `skill.approval_request`
 - `skill.approval_decision`
+- `skill.approval_decision_claim`
 - `skill.approver_snapshot`
 - `skill.notification_event`
+- `skill.task_event`
 - `skill.export_run`
 - `skill.export_item`
 - `skill.accounting_reference_cache`
@@ -113,18 +118,21 @@ Use UTC ISO-8601 timestamps for instants. Store date-only business fields, such 
 
 When an admin sets up ExpenseFlow:
 
-1. Discover org users with `kolo list-peers`.
-2. Create org settings in `skill.expense_settings`.
-3. Configure default and fallback approvers in `skill.approval_policy`.
-4. Configure department routing in `skill.department_policy` if needed.
-5. Configure export destination in `skill.accounting_destination`: CSV, Google Sheets, Google Drive/Gmail, or QuickBooks Online.
-6. If QBO is selected, connect the realm, configure its explicit transaction
+1. Obtain the actual Kolo organization UUID; never pilot with `default`.
+2. Discover org users with `kolo list-peers`.
+3. Create org settings in `skill.expense_settings`.
+4. Configure default and fallback approvers in `skill.approval_policy`.
+5. Configure department routing in `skill.department_policy` if needed.
+6. Configure export destination in `skill.accounting_destination`: CSV, Google Sheets, Google Drive/Gmail, or QuickBooks Online.
+7. If QBO is selected, connect the realm, configure its explicit transaction
    type and account mappings, then run `qbo-refresh-cache`.
-7. Configure categories and receipt thresholds.
-8. Create `skill.user_profile` records for employees.
-9. Send policy acknowledgement messages with `kolo contact-agent`.
-10. Run `setup-readiness` and resolve every blocker before starting a pilot.
-11. Log setup completion with `kolo log-action`.
+8. Configure categories and receipt thresholds.
+9. Create `skill.user_profile` records for employees.
+10. Map each active approver's inbound `sender_id` to exactly one profile.
+11. Send policy acknowledgement messages with `kolo contact-agent`.
+12. Have every pilot participant install the same ExpenseFlow version.
+13. Run `setup-readiness` and resolve every blocker before starting a pilot.
+14. Log setup completion with `kolo log-action`.
 
 `setup-readiness` is deterministic and read-only. It returns `not_ready`,
 `ready_with_warnings`, or `ready`, plus the first next action and all checks.
@@ -275,11 +283,13 @@ When a user submits expenses:
 4. Run policy checks.
 5. Route and re-validate approver.
 6. Create `skill.approver_snapshot`.
-7. Create `skill.approval_request`.
-8. Send approval request with `kolo contact-agent`.
-9. Create optional visibility task with `kolo task-create`.
-10. Update report to `pending_approval`.
+7. Create `skill.approval_request` and persist report, request, and submitted expenses.
+8. Reserve a deterministic `skill.notification_event`, then send the approval request with `kolo contact-agent`.
+9. Reserve a deterministic `skill.task_event`, then create the visibility task with `kolo task-create`.
+10. Store the returned queue and task IDs on the approval request.
 11. Log submission.
+
+The approval message must include `approval_request_id` and explicit approve/reject reply forms. If message or task delivery may have occurred but its response is lost, mark the event unknown and require review. Never resend or recreate that side effect automatically.
 
 When reminders are enabled, submission also stores `next_reminder_at`,
 `reminder_count`, and `reminder_status` on the approval request. Run due sweeps
@@ -303,7 +313,9 @@ Never infer approval from reminder activity. After a decision, set reminders to
 `resolved` and complete the visibility task with
 `kolo task-complete --task-id <task_id>`.
 
-For implementation, call `submit_report_for_approval(...)` from `kolo_workflows.py`. It creates `skill.expense_report`, sends the approver message through the gateway, creates a visibility task, writes `skill.approval_request`, marks included expenses `submitted`, and logs an idempotent audit event.
+For implementation, call `submit_report_for_approval(...)` from
+`kolo_workflows.py`. It persists the report, request, snapshot, and submitted
+expenses before reserved, at-most-once message and task delivery.
 
 Use `contact-agent` plus governed records for internal expense approvals. Do not use `kolo request-approval` for normal manager approvals.
 
@@ -312,13 +324,19 @@ Use `kolo quickbooks write` only for external accounting mutations after the int
 Approval replies:
 
 - Parse plain-language replies into candidate decisions.
-- Validate report/expense IDs, sender, delegation, decision type, and rejection notes.
-- Lock approval processing with short expiration fields.
+- Require an explicit `approval_request_id` or exact stored backchannel queue ID.
+- Resolve inbound `sender_id` through one unique same-org `skill.user_profile`.
+- Validate report/expense IDs, assigned approver, decision type, and rejection notes.
+- Claim the request with deterministic `skill.approval_decision_claim` before any status update.
 - Create `skill.approval_decision`.
 - Update report and expense statuses.
 - Acknowledge inbound message when supported.
 - Complete visibility task when supported.
 - Log the decision idempotently.
+
+Use `decide-report-from-sender` for inbound backchannel replies. Do not call
+`decide-report` with an approver ID inferred by the model. A completed identical
+decision may replay; a conflicting or incomplete prior claim requires review.
 
 Report statuses:
 

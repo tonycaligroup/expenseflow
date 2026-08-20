@@ -32,6 +32,29 @@ the sequence, subject to the constraints below.
   a held `skill.identity_discovery` record for administrator mapping; the skill
   never guesses the relationship.
 
+## Backchannel Safety Contract
+
+Kolo's follow-up review found that the initial implementation was not safe to
+pilot because it delivered approval messages and tasks before persisting state,
+did not expose `approval_request_id` in the initial message, and had no inbound
+sender/queue resolver or single-flight decision claim.
+
+The corrected contract is:
+
+- Use the actual Kolo organization UUID and the same skill version for every
+  pilot participant.
+- Persist report, request, snapshot, and submitted expenses before communication.
+- Reserve deterministic notification and task events before side effects.
+- Never automatically repeat an unknown message or task outcome.
+- Include `approval_request_id` in every approval message.
+- Resolve replies by explicit request ID or exact queue ID and a unique same-org
+  sender mapping.
+- Claim each approval request before writing one deterministic decision.
+- Treat incomplete claims and conflicting replies as manual-review conditions.
+
+These controls require live platform tests before the pilot; unit tests cannot
+prove Kolo's delivery, queue-correlation, or concurrent record semantics.
+
 ## Pilot Acceptance Path
 
 1. Configure organization settings, policy, administrators, and CSV destination.

@@ -232,7 +232,7 @@ class ReceiptAndReminderWorkflowTests(unittest.TestCase):
         self.assertEqual(second["escalated"], [{"approval_request_id": "ar_1", "user_id": 99}])
         request = self.gateway.get_record(APPROVAL_REQUEST, "ar_1")["payload"]
         self.assertEqual(request["reminder_status"], "exhausted")
-        self.assertEqual(len(self.gateway.list_records(NOTIFICATION_EVENT)), 3)
+        self.assertEqual(len(self.gateway.list_records(NOTIFICATION_EVENT)), 4)
 
     def test_decision_resolves_reminders_and_completes_visibility_task(self):
         self._capture()

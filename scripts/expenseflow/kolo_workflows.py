@@ -50,10 +50,12 @@ RECEIPT = "skill.receipt"
 EXPENSE_REPORT = "skill.expense_report"
 APPROVAL_REQUEST = "skill.approval_request"
 APPROVAL_DECISION = "skill.approval_decision"
+APPROVAL_DECISION_CLAIM = "skill.approval_decision_claim"
 APPROVAL_DELEGATION = "skill.approval_delegation"
 APPROVER_SNAPSHOT = "skill.approver_snapshot"
 IDENTITY_DISCOVERY = "skill.identity_discovery"
 NOTIFICATION_EVENT = "skill.notification_event"
+TASK_EVENT = "skill.task_event"
 EXPORT_RUN = "skill.export_run"
 EXPORT_ITEM = "skill.export_item"
 ACCOUNTING_REFERENCE_CACHE = "skill.accounting_reference_cache"
@@ -820,8 +822,28 @@ def submit_report_for_approval(
     report_id=None,
     approval_request_id=None,
 ):
+    submitter_user_id = _normalize_user_id(submitter_user_id)
+    expense_ids = list(dict.fromkeys(str(expense_id) for expense_id in expense_ids))
+    report_id, approval_request_id = _submission_ids(
+        org_id,
+        submitter_user_id,
+        expense_ids,
+        report_id,
+        approval_request_id,
+    )
     submitter = _payload(gateway.get_record(USER_PROFILE, submitter_user_id))
     _require_record_org(submitter, org_id, "submitter")
+    existing_report = _optional_payload(gateway, EXPENSE_REPORT, report_id)
+    if existing_report is not None:
+        return _resume_report_submission(
+            gateway,
+            existing_report,
+            submitter,
+            expense_ids,
+            approval_request_id,
+            org_id,
+        )
+
     expenses = [_payload(gateway.get_record(EXPENSE, expense_id)) for expense_id in expense_ids]
     for expense in expenses:
         _require_record_org(expense, org_id, "expense")
@@ -854,20 +876,8 @@ def submit_report_for_approval(
     approval_request = initialize_reminder_schedule(approval_request, settings)
     snapshot = _create_approver_snapshot(gateway, approval["report"], approval_request, policies)
     approval_request["approver_snapshot_id"] = snapshot["snapshot_id"]
-    message_result = gateway.contact_agent(
-        approval_request["approver_user_id"],
-        _with_message_prefix(settings, _approval_message(approval["report"], submitter)),
-    )
-    task = gateway.create_task(
-        _with_message_prefix(settings, f"Review expense report {approval['report']['report_id']}"),
-        approval_request["approver_user_id"],
-        {"report_id": approval["report"]["report_id"]},
-    )
-    approval_request["backchannel_queue_id"] = message_result.get("queueId")
-    approval_request["task_id"] = task.get("task_id")
-
-    gateway.upsert_record(EXPENSE_REPORT, approval["report"]["report_id"], approval["report"], "pending_approval")
     gateway.upsert_record(APPROVAL_REQUEST, approval_request["approval_request_id"], approval_request, "pending")
+    gateway.upsert_record(EXPENSE_REPORT, approval["report"]["report_id"], approval["report"], "pending_approval")
     for expense in expenses:
         submitted = _transition_expense(expense, "submitted")
         submitted["report_id"] = approval["report"]["report_id"]
@@ -881,13 +891,49 @@ def submit_report_for_approval(
             "approval_request_id": approval_request["approval_request_id"],
         },
     )
-    return {**approval, "approval_request": approval_request}
+    approval_request, communication = _deliver_approval_request_once(
+        gateway,
+        approval["report"],
+        approval_request,
+        submitter,
+        settings,
+    )
+    status = "ok" if communication["status"] == "delivered" else "communication_review_required"
+    return {**approval, "status": status, "approval_request": approval_request, "communication": communication}
 
 
-def decide_report_approval(gateway, approval_request_id, approver_user_id, decision, note=None, decision_id=None):
+def decide_report_approval(
+    gateway,
+    approval_request_id,
+    approver_user_id,
+    decision,
+    note=None,
+    decision_id=None,
+    org_id=None,
+):
+    approver_user_id = _normalize_user_id(approver_user_id)
     approval_request = _payload(gateway.get_record(APPROVAL_REQUEST, approval_request_id))
+    resolved_org_id = str(org_id if org_id is not None else approval_request.get("org_id", "default"))
+    _require_record_org(approval_request, resolved_org_id, "approval request")
     report = _payload(gateway.get_record(EXPENSE_REPORT, approval_request["report_id"]))
+    _require_record_org(report, resolved_org_id, "report")
     expenses = [_payload(gateway.get_record(EXPENSE, expense_id)) for expense_id in report.get("expense_ids", [])]
+    for expense in expenses:
+        _require_record_org(expense, resolved_org_id, "expense")
+    deterministic_decision_id = decision_id or _approval_decision_id(resolved_org_id, approval_request_id)
+
+    claim_id = f"{resolved_org_id}:{approval_request_id}"
+    existing_claim = _optional_payload(gateway, APPROVAL_DECISION_CLAIM, claim_id)
+    if existing_claim is not None:
+        return _resolve_existing_decision_claim(
+            gateway,
+            existing_claim,
+            approval_request,
+            approver_user_id,
+            decision,
+            note,
+        )
+
     result = record_approval_decision(
         report,
         expenses,
@@ -895,20 +941,55 @@ def decide_report_approval(gateway, approval_request_id, approver_user_id, decis
         approver_user_id,
         decision,
         note=note,
-        decision_id=decision_id,
+        decision_id=deterministic_decision_id,
     )
+    result["approval_decision"]["org_id"] = resolved_org_id
     result["approval_request"]["reminder_status"] = "resolved"
     result["approval_request"]["next_reminder_at"] = None
-    gateway.upsert_record(EXPENSE_REPORT, result["report"]["report_id"], result["report"], result["report"]["status"])
-    gateway.upsert_record(APPROVAL_REQUEST, approval_request_id, result["approval_request"], result["approval_request"]["status"])
-    gateway.upsert_record(
-        APPROVAL_DECISION,
-        result["approval_decision"]["approval_decision_id"],
-        result["approval_decision"],
-        result["approval_decision"]["decision"],
-    )
-    for expense in result["expenses"]:
-        gateway.upsert_record(EXPENSE, expense["expense_id"], expense, expense["status"])
+    claim = {
+        "approval_decision_claim_id": claim_id,
+        "org_id": resolved_org_id,
+        "approval_request_id": approval_request_id,
+        "report_id": report["report_id"],
+        "status": "claimed",
+        "claimed_at": utc_now(),
+        "schema_version": 1,
+    }
+    reservation = gateway.upsert_record(APPROVAL_DECISION_CLAIM, claim_id, claim, "claimed")
+    if not reservation.get("created", False):
+        raise ExpenseFlowError(
+            "approval_decision_in_progress",
+            "This approval request already has a decision in progress. Review governed state before retrying.",
+            details={"approval_request_id": approval_request_id},
+        )
+
+    try:
+        gateway.upsert_record(
+            APPROVAL_DECISION,
+            result["approval_decision"]["approval_decision_id"],
+            result["approval_decision"],
+            result["approval_decision"]["decision"],
+        )
+        gateway.upsert_record(
+            EXPENSE_REPORT,
+            result["report"]["report_id"],
+            result["report"],
+            result["report"]["status"],
+        )
+        gateway.upsert_record(
+            APPROVAL_REQUEST,
+            approval_request_id,
+            result["approval_request"],
+            result["approval_request"]["status"],
+        )
+        for expense in result["expenses"]:
+            gateway.upsert_record(EXPENSE, expense["expense_id"], expense, expense["status"])
+    except ExpenseFlowError as exc:
+        claim["status"] = "review_required"
+        claim["error_code"] = exc.code
+        claim["completed_at"] = utc_now()
+        gateway.upsert_record(APPROVAL_DECISION_CLAIM, claim_id, claim, claim["status"])
+        raise
     task_id = result["approval_request"].get("task_id")
     if task_id:
         try:
@@ -933,7 +1014,319 @@ def decide_report_approval(gateway, approval_request_id, approver_user_id, decis
             "decision": decision,
         },
     )
+    claim.update(
+        {
+            "status": "complete",
+            "approval_decision_id": result["approval_decision"]["approval_decision_id"],
+            "approver_user_id": approver_user_id,
+            "decision": decision,
+            "note": str(note or "").strip(),
+            "completed_at": utc_now(),
+        }
+    )
+    gateway.upsert_record(APPROVAL_DECISION_CLAIM, claim_id, claim, "complete")
     return result
+
+
+def decide_report_approval_from_sender(
+    gateway,
+    sender_id,
+    decision,
+    org_id,
+    approval_request_id=None,
+    queue_id=None,
+    note=None,
+    decision_id=None,
+):
+    matches = _profiles_for_sender(gateway, sender_id, org_id)
+    if not matches:
+        raise ExpenseFlowError(
+            "unmapped_approval_sender",
+            "Approval sender is not mapped to an ExpenseFlow user in this organization.",
+            details={"sender_id": sender_id},
+        )
+    if len(matches) != 1:
+        raise ExpenseFlowError(
+            "ambiguous_sender_identity",
+            "Approval sender maps to more than one ExpenseFlow user.",
+            details={"sender_id": sender_id},
+        )
+    approver = matches[0]
+    if approver.get("status") != "active" or not approver.get("can_approve"):
+        raise ExpenseFlowError(
+            "ineligible_approval_sender",
+            "Approval sender is not an active ExpenseFlow approver.",
+            details={"user_id": approver.get("user_id")},
+        )
+    request = _resolve_inbound_approval_request(gateway, org_id, approval_request_id, queue_id)
+    return decide_report_approval(
+        gateway,
+        request["approval_request_id"],
+        approver["user_id"],
+        decision,
+        note=note,
+        decision_id=decision_id,
+        org_id=org_id,
+    )
+
+
+def _submission_ids(org_id, submitter_user_id, expense_ids, report_id, approval_request_id):
+    fingerprint = "|".join(
+        [str(org_id), str(submitter_user_id), *sorted(str(expense_id) for expense_id in expense_ids)]
+    )
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+    return report_id or f"er_{digest}", approval_request_id or f"ar_{digest}"
+
+
+def _resume_report_submission(gateway, report, submitter, expense_ids, approval_request_id, org_id):
+    _require_record_org(report, org_id, "report")
+    if _normalize_user_id(report.get("submitter_user_id")) != _normalize_user_id(submitter.get("user_id")):
+        raise ExpenseFlowError(
+            "report_submission_conflict",
+            "The deterministic report ID belongs to a different submitter.",
+            details={"report_id": report.get("report_id")},
+        )
+    if sorted(str(value) for value in report.get("expense_ids", [])) != sorted(expense_ids):
+        raise ExpenseFlowError(
+            "report_submission_conflict",
+            "The deterministic report ID belongs to a different expense set.",
+            details={"report_id": report.get("report_id")},
+        )
+    if report.get("status") == "held_pending_manager":
+        return {
+            "status": "held_pending_manager",
+            "report": report,
+            "routing": {"status": "held_pending_manager"},
+            "approval_request": None,
+            "idempotent_replay": True,
+        }
+    if report.get("status") != "pending_approval":
+        raise ExpenseFlowError(
+            "report_submission_conflict",
+            "An existing report cannot be submitted again from its current status.",
+            details={"report_id": report.get("report_id"), "status": report.get("status")},
+        )
+    if report.get("approval_request_id") != approval_request_id:
+        raise ExpenseFlowError(
+            "approval_request_conflict",
+            "The report is linked to a different approval request.",
+            details={"report_id": report.get("report_id")},
+        )
+    request = _optional_payload(gateway, APPROVAL_REQUEST, approval_request_id)
+    if request is None:
+        raise ExpenseFlowError(
+            "submission_state_incomplete",
+            "The report exists without its approval request. Review governed state before delivery.",
+            details={"report_id": report.get("report_id"), "approval_request_id": approval_request_id},
+        )
+    _require_record_org(request, org_id, "approval request")
+    if request.get("report_id") != report.get("report_id"):
+        raise ExpenseFlowError(
+            "approval_request_conflict",
+            "The approval request is linked to a different report.",
+            details={"approval_request_id": approval_request_id},
+        )
+
+    for expense_id in expense_ids:
+        expense = _payload(gateway.get_record(EXPENSE, expense_id))
+        _require_record_org(expense, org_id, "expense")
+        if expense.get("status") == "draft":
+            expense = _transition_expense(expense, "submitted")
+            expense["report_id"] = report["report_id"]
+            gateway.upsert_record(EXPENSE, expense_id, expense, "submitted")
+        elif expense.get("status") != "submitted" or expense.get("report_id") != report.get("report_id"):
+            raise ExpenseFlowError(
+                "submission_state_conflict",
+                "An expense is not safely recoverable into the existing report.",
+                details={"expense_id": expense_id, "status": expense.get("status")},
+            )
+
+    settings = _optional_payload(gateway, EXPENSE_SETTINGS, org_id, default={})
+    request, communication = _deliver_approval_request_once(gateway, report, request, submitter, settings)
+    status = "ok" if communication["status"] == "delivered" else "communication_review_required"
+    return {
+        "status": status,
+        "report": report,
+        "routing": {
+            "status": "ok",
+            "approver_user_id": request.get("approver_user_id"),
+            "routing_reason": request.get("routing_reason"),
+        },
+        "approval_request": request,
+        "communication": communication,
+        "idempotent_replay": True,
+    }
+
+
+def _deliver_approval_request_once(gateway, report, request, submitter, settings):
+    org_id = str(request.get("org_id", report.get("org_id", "default")))
+    request_id = request["approval_request_id"]
+    now = utc_now()
+    notification_event_id = f"{org_id}:{request_id}:initial-approval"
+    notification = _existing_notification_delivery(gateway, notification_event_id)
+    if notification is None:
+        notification = _send_notification_once(
+            gateway,
+            notification_event_id,
+            org_id,
+            request["approver_user_id"],
+            "initial_approval",
+            _with_message_prefix(settings, _approval_message(report, submitter, request)),
+            request,
+            now,
+        )
+        if notification["status"] == "skipped":
+            notification = _existing_notification_delivery(gateway, notification_event_id)
+    request = dict(request)
+    request["initial_notification_event_id"] = notification_event_id
+    request["initial_notification_status"] = notification["status"]
+    if notification.get("queue_id"):
+        request["backchannel_queue_id"] = notification["queue_id"]
+    gateway.upsert_record(APPROVAL_REQUEST, request_id, request, request["status"])
+
+    task_event_id = f"{org_id}:{request_id}:approval-task"
+    task = _create_task_once(
+        gateway,
+        task_event_id,
+        org_id,
+        request["approver_user_id"],
+        _with_message_prefix(settings, f"Review expense report {report['report_id']} ({request_id})"),
+        {"report_id": report["report_id"], "approval_request_id": request_id},
+        now,
+    )
+    request["task_event_id"] = task_event_id
+    request["task_creation_status"] = task["status"]
+    if task.get("task_id"):
+        request["task_id"] = task["task_id"]
+    gateway.upsert_record(APPROVAL_REQUEST, request_id, request, request["status"])
+
+    notification_ok = notification["status"] in {"sent", "already_sent"}
+    task_ok = task["status"] in {"created", "already_created"}
+    return request, {
+        "status": "delivered" if notification_ok and task_ok else "review_required",
+        "notification": notification,
+        "task": task,
+    }
+
+
+def _existing_notification_delivery(gateway, event_id):
+    event = _optional_payload(gateway, NOTIFICATION_EVENT, event_id)
+    if event is None:
+        return None
+    if event.get("status") == "sent":
+        return {
+            "status": "already_sent",
+            "notification_event_id": event_id,
+            "queue_id": event.get("queue_id"),
+        }
+    return {
+        "status": event.get("status", "delivery_unknown"),
+        "notification_event_id": event_id,
+    }
+
+
+def _create_task_once(gateway, event_id, org_id, user_id, title, metadata, as_of):
+    existing = _optional_payload(gateway, TASK_EVENT, event_id)
+    if existing is not None:
+        if existing.get("status") == "created":
+            return {"status": "already_created", "task_event_id": event_id, "task_id": existing.get("task_id")}
+        return {"status": existing.get("status", "creation_unknown"), "task_event_id": event_id}
+    event = {
+        "task_event_id": event_id,
+        "org_id": org_id,
+        "kind": "approval_visibility",
+        "approval_request_id": metadata["approval_request_id"],
+        "report_id": metadata["report_id"],
+        "target_user_id": user_id,
+        "status": "reserved",
+        "reserved_at": as_of,
+        "schema_version": 1,
+    }
+    reservation = gateway.upsert_record(TASK_EVENT, event_id, event, "reserved")
+    if not reservation.get("created", False):
+        existing = _optional_payload(gateway, TASK_EVENT, event_id, default=event)
+        return {"status": existing.get("status", "reserved"), "task_event_id": event_id}
+    try:
+        task = gateway.create_task(title, user_id, metadata)
+    except ExpenseFlowError as exc:
+        event["status"] = "creation_unknown"
+        event["creation_error"] = exc.code
+        event["completed_at"] = as_of
+        gateway.upsert_record(TASK_EVENT, event_id, event, event["status"])
+        return {"status": "creation_unknown", "task_event_id": event_id}
+    event["status"] = "created"
+    event["task_id"] = task.get("task_id")
+    event["completed_at"] = as_of
+    gateway.upsert_record(TASK_EVENT, event_id, event, "created")
+    return {"status": "created", "task_event_id": event_id, "task_id": event.get("task_id")}
+
+
+def _approval_decision_id(org_id, approval_request_id):
+    digest = hashlib.sha256(f"{org_id}|{approval_request_id}".encode("utf-8")).hexdigest()[:16]
+    return f"ad_{digest}"
+
+
+def _resolve_existing_decision_claim(gateway, claim, request, approver_user_id, decision, note):
+    if claim.get("status") != "complete":
+        raise ExpenseFlowError(
+            "approval_decision_review_required",
+            "A prior decision attempt did not finish cleanly. Review governed state before taking another decision.",
+            details={"approval_request_id": request.get("approval_request_id"), "claim_status": claim.get("status")},
+        )
+    normalized_note = str(note or "").strip()
+    if (
+        _normalize_user_id(claim.get("approver_user_id")) != approver_user_id
+        or claim.get("decision") != decision
+        or claim.get("note", "") != normalized_note
+    ):
+        raise ExpenseFlowError(
+            "approval_decision_conflict",
+            "This approval request already has a different completed decision.",
+            details={"approval_request_id": request.get("approval_request_id")},
+        )
+    completed_request = _payload(gateway.get_record(APPROVAL_REQUEST, request["approval_request_id"]))
+    report = _payload(gateway.get_record(EXPENSE_REPORT, completed_request["report_id"]))
+    expenses = [_payload(gateway.get_record(EXPENSE, expense_id)) for expense_id in report.get("expense_ids", [])]
+    approval_decision = _payload(gateway.get_record(APPROVAL_DECISION, claim["approval_decision_id"]))
+    return {
+        "status": "already_decided",
+        "report": report,
+        "expenses": expenses,
+        "approval_request": completed_request,
+        "approval_decision": approval_decision,
+    }
+
+
+def _resolve_inbound_approval_request(gateway, org_id, approval_request_id, queue_id):
+    if not approval_request_id and not queue_id:
+        raise ExpenseFlowError(
+            "missing_approval_correlation",
+            "Approval replies require an approval request ID or an exact backchannel queue ID.",
+        )
+    request = None
+    if approval_request_id:
+        request = _payload(gateway.get_record(APPROVAL_REQUEST, approval_request_id))
+        _require_record_org(request, org_id, "approval request")
+    if queue_id:
+        queue_matches = [
+            candidate
+            for candidate in (_payload(record) for record in gateway.list_records(APPROVAL_REQUEST))
+            if str(candidate.get("org_id", org_id)) == str(org_id)
+            and candidate.get("backchannel_queue_id") == queue_id
+        ]
+        if len(queue_matches) != 1:
+            raise ExpenseFlowError(
+                "ambiguous_approval_correlation" if queue_matches else "approval_correlation_not_found",
+                "Backchannel queue ID must identify exactly one approval request in this organization.",
+                details={"queue_id": queue_id, "match_count": len(queue_matches)},
+            )
+        if request is not None and request.get("approval_request_id") != queue_matches[0].get("approval_request_id"):
+            raise ExpenseFlowError(
+                "approval_correlation_conflict",
+                "Approval request ID and queue ID refer to different requests.",
+            )
+        request = queue_matches[0]
+    return request
 
 
 def send_due_approval_reminders(gateway, org_id="default", as_of=None):
@@ -2198,9 +2591,12 @@ def _with_message_prefix(settings, message):
     return f"{prefix} {message}" if prefix else message
 
 
-def _approval_message(report, submitter):
+def _approval_message(report, submitter, request):
     totals = ", ".join(f"{currency} {amount}" for currency, amount in report.get("totals_by_currency", {}).items())
     return (
         f"ExpenseFlow approval needed: report {report.get('report_id')} "
-        f"from {submitter.get('display_name')} totaling {totals or '0.00'}."
+        f"from {submitter.get('display_name')} totaling {totals or '0.00'}. "
+        f"Approval request: {request.get('approval_request_id')}. "
+        f"Reply with 'approve {request.get('approval_request_id')}' or "
+        f"'reject {request.get('approval_request_id')}: reason'."
     )

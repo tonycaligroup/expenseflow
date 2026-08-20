@@ -34,6 +34,7 @@ def evaluate_setup_readiness(
     peers = list(peers or [])
     checks = []
 
+    _organization_identity_check(checks, org_id)
     _settings_checks(checks, settings)
     _approval_checks(
         checks,
@@ -75,6 +76,20 @@ def evaluate_setup_readiness(
         "next_action": next_action,
         "schema_version": 1,
     }
+
+
+def _organization_identity_check(checks, org_id):
+    if not str(org_id or "").strip() or str(org_id).strip().lower() == "default":
+        checks.append(
+            _check(
+                "organization_identity",
+                "blocker",
+                "ExpenseFlow is using the placeholder organization ID.",
+                "Configure and run ExpenseFlow with the actual Kolo organization UUID before any pilot.",
+            )
+        )
+    else:
+        checks.append(_check("organization_identity", "pass", "The Kolo organization ID is explicit."))
 
 
 def _settings_checks(checks, settings):
@@ -285,6 +300,36 @@ def _approval_checks(checks, approval_policy, profiles, department_policies, app
                 "approver_coverage",
                 "pass",
                 "Every active submitter has a valid non-self approver route.",
+            )
+        )
+    profiles_by_id = {str(profile.get("user_id")): profile for profile in profiles}
+    active_approver_ids = {
+        str(profile.get("user_id"))
+        for profile in profiles
+        if profile.get("status") == "active" and profile.get("can_approve")
+    }
+    invalid_sender_mappings = []
+    for approver_id in sorted(active_approver_ids):
+        sender_id = profiles_by_id.get(approver_id, {}).get("sender_id")
+        sender_match_count = len([profile for profile in profiles if sender_id and profile.get("sender_id") == sender_id])
+        if not sender_id or sender_match_count != 1:
+            invalid_sender_mappings.append(approver_id)
+    if invalid_sender_mappings:
+        checks.append(
+            _check(
+                "approval_sender_mappings",
+                "blocker",
+                "One or more active approvers lacks a unique backchannel sender mapping.",
+                "Map each active approver's sender UUID to exactly one active ExpenseFlow profile.",
+                details={"user_ids": invalid_sender_mappings},
+            )
+        )
+    elif active_approver_ids:
+        checks.append(
+            _check(
+                "approval_sender_mappings",
+                "pass",
+                "Every active approver has a unique backchannel sender mapping.",
             )
         )
     try:
