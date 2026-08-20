@@ -13,6 +13,7 @@ from scripts.expenseflow.kolo_workflows import (
     capture_expense,
     decide_report_approval,
     decide_report_approval_from_sender,
+    decide_report_approval_from_user,
     reconcile_approval_decision,
     submit_report_for_approval,
     upsert_approval_policy,
@@ -181,7 +182,7 @@ class BackchannelSafetyTests(unittest.TestCase):
         event = gateway.list_records(TASK_EVENT)[0]["payload"]
         self.assertEqual(event["status"], "creation_unknown")
 
-    def test_inbound_decision_resolves_uuid_sender_and_exact_queue(self):
+    def test_legacy_inbound_decision_resolves_uuid_sender_and_exact_queue(self):
         gateway = self._configured_gateway()
         self._capture(gateway)
         submitted = self._submit(gateway)
@@ -197,6 +198,196 @@ class BackchannelSafetyTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["approval_decision"]["approver_user_id"], 2)
         self.assertEqual(gateway.get_record(EXPENSE_REPORT, "er_safe")["status"], "approved")
+
+    def test_inbound_decision_uses_platform_user_id_without_sender_mapping(self):
+        gateway = self._configured_gateway()
+        approver = gateway.get_record("skill.user_profile", 2)["payload"]
+        approver.pop("sender_id")
+        upsert_user_profile(gateway, approver)
+        self._capture(gateway)
+        self._submit(gateway)
+
+        result = decide_report_approval_from_user(
+            gateway,
+            2,
+            "approved",
+            ORG_ID,
+            from_org_id=ORG_ID,
+            approval_request_id="ar_safe",
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["approval_decision"]["approver_user_id"], 2)
+
+    def test_platform_user_decision_rejects_wrong_or_unknown_approver(self):
+        gateway = self._configured_gateway()
+        upsert_user_profile(
+            gateway,
+            {
+                "user_id": 3,
+                "org_id": ORG_ID,
+                "display_name": "Other Approver",
+                "status": "active",
+                "can_approve": True,
+            },
+        )
+        self._capture(gateway)
+        self._submit(gateway)
+
+        with self.assertRaises(ExpenseFlowError) as wrong:
+            decide_report_approval_from_user(
+                gateway,
+                3,
+                "approved",
+                ORG_ID,
+                from_org_id=ORG_ID,
+                approval_request_id="ar_safe",
+            )
+        self.assertEqual(wrong.exception.code, "wrong_approver")
+
+        with self.assertRaises(ExpenseFlowError) as unknown:
+            decide_report_approval_from_user(
+                gateway,
+                999,
+                "approved",
+                ORG_ID,
+                from_org_id=ORG_ID,
+                approval_request_id="ar_safe",
+            )
+        self.assertEqual(unknown.exception.code, "unknown_approval_user")
+
+    def test_platform_user_decision_infers_only_one_pending_request(self):
+        gateway = self._configured_gateway()
+        self._capture(gateway)
+        self._submit(gateway)
+
+        result = decide_report_approval_from_user(
+            gateway,
+            2,
+            "approved",
+            ORG_ID,
+            from_org_id=ORG_ID,
+            queue_id="inbound-queue-1",
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["approval_request"]["approval_request_id"], "ar_safe")
+        self.assertEqual(
+            result["approval_decision"]["source_metadata"],
+            {
+                "channel": "kolo_backchannel",
+                "from_user_id": 2,
+                "from_org_id": ORG_ID,
+                "queue_id": "inbound-queue-1",
+            },
+        )
+
+    def test_platform_user_decision_holds_when_pending_requests_are_ambiguous(self):
+        gateway = self._configured_gateway()
+        self._capture(gateway)
+        self._submit(gateway)
+        self._capture(gateway, expense_id="exp_other")
+        submit_report_for_approval(
+            gateway,
+            1,
+            ["exp_other"],
+            org_id=ORG_ID,
+            report_id="er_other",
+            approval_request_id="ar_other",
+        )
+
+        with self.assertRaises(ExpenseFlowError) as ambiguous:
+            decide_report_approval_from_user(
+                gateway,
+                2,
+                "approved",
+                ORG_ID,
+                from_org_id=ORG_ID,
+            )
+
+        self.assertEqual(ambiguous.exception.code, "ambiguous_pending_approvals")
+        self.assertEqual(
+            ambiguous.exception.details["approval_request_ids"],
+            ["ar_other", "ar_safe"],
+        )
+
+    def test_platform_user_decision_rejects_conflicting_exact_correlators(self):
+        gateway = self._configured_gateway()
+        self._capture(gateway)
+        self._submit(gateway)
+        self._capture(gateway, expense_id="exp_other")
+        other = submit_report_for_approval(
+            gateway,
+            1,
+            ["exp_other"],
+            org_id=ORG_ID,
+            report_id="er_other",
+            approval_request_id="ar_other",
+        )
+
+        with self.assertRaises(ExpenseFlowError) as conflict:
+            decide_report_approval_from_user(
+                gateway,
+                2,
+                "approved",
+                ORG_ID,
+                from_org_id=ORG_ID,
+                approval_request_id="ar_safe",
+                queue_id=other["approval_request"]["backchannel_queue_id"],
+            )
+
+        self.assertEqual(conflict.exception.code, "approval_correlation_conflict")
+
+    def test_platform_user_decision_requires_a_pending_request_for_inference(self):
+        gateway = self._configured_gateway()
+
+        with self.assertRaises(ExpenseFlowError) as missing:
+            decide_report_approval_from_user(
+                gateway,
+                2,
+                "approved",
+                ORG_ID,
+                from_org_id=ORG_ID,
+            )
+
+        self.assertEqual(missing.exception.code, "no_pending_approval_for_user")
+
+    def test_platform_user_decision_rejects_invalid_or_cross_org_identity(self):
+        gateway = self._configured_gateway()
+        self._capture(gateway)
+        self._submit(gateway)
+
+        with self.assertRaises(ExpenseFlowError) as invalid:
+            decide_report_approval_from_user(
+                gateway,
+                "not-a-user-id",
+                "approved",
+                ORG_ID,
+                from_org_id=ORG_ID,
+                approval_request_id="ar_safe",
+            )
+        self.assertEqual(invalid.exception.code, "invalid_from_user_id")
+
+        with self.assertRaises(ExpenseFlowError) as cross_org:
+            decide_report_approval_from_user(
+                gateway,
+                2,
+                "approved",
+                OTHER_ORG_ID,
+                from_org_id=ORG_ID,
+                approval_request_id="ar_safe",
+            )
+        self.assertEqual(cross_org.exception.code, "organization_mismatch")
+
+        with self.assertRaises(ExpenseFlowError) as missing_org:
+            decide_report_approval_from_user(
+                gateway,
+                2,
+                "approved",
+                ORG_ID,
+                approval_request_id="ar_safe",
+            )
+        self.assertEqual(missing_org.exception.code, "missing_from_org_id")
 
     def test_inbound_decision_rejects_unmapped_sender_and_cross_org_request(self):
         gateway = self._configured_gateway()

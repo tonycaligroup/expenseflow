@@ -129,7 +129,7 @@ When an admin sets up ExpenseFlow:
    type and account mappings, then run `qbo-refresh-cache`.
 8. Configure categories and receipt thresholds.
 9. Create `skill.user_profile` records for employees.
-10. Map each active approver's inbound `sender_id` to exactly one profile.
+10. Verify each active approver has the correct integer Kolo `user_id`.
 11. Send policy acknowledgement messages with `kolo contact-agent`.
 12. Have every pilot participant install the same ExpenseFlow version.
 13. Run `setup-readiness` and resolve every blocker before starting a pilot.
@@ -173,7 +173,9 @@ Scheduled discovery:
 
 Just-in-time discovery:
 
-- Resolve a known inbound `sender_id` through `skill.user_profile`.
+- Prefer the platform-stamped integer `fromUserId` as the submitter identity.
+- Resolve a legacy inbound `sender_id` through `skill.user_profile` only when
+  `fromUserId` is unavailable.
 - If inbound context has only an unmapped UUID sender ID, store the validated
   expense as `held_pending_onboarding`, create `skill.identity_discovery` as
   `pending_admin_mapping`, and ask an admin to map it to an integer Kolo user ID.
@@ -325,8 +327,11 @@ Use `kolo quickbooks write` only for external accounting mutations after the int
 Approval replies:
 
 - Parse plain-language replies into candidate decisions.
-- Require an explicit `approval_request_id` or exact stored backchannel queue ID.
-- Resolve inbound `sender_id` through one unique same-org `skill.user_profile`.
+- Read integer `fromUserId` from Kolo backchannel metadata, never message text.
+- Match `fromUserId` directly to the assigned `approver_user_id`.
+- Prefer an explicit `approval_request_id` or exact stored outbound queue ID.
+- When neither correlator is available, infer only when that approver has exactly
+  one pending request; otherwise hold and ask for the request ID.
 - Validate report/expense IDs, assigned approver, decision type, and rejection notes.
 - Claim the request with deterministic `skill.approval_decision_claim` before any status update.
 - Create `skill.approval_decision`.
@@ -335,8 +340,11 @@ Approval replies:
 - Complete visibility task when supported.
 - Log the decision idempotently.
 
-Use `decide-report-from-sender` for inbound backchannel replies. Do not call
-`decide-report` with an approver ID inferred by the model. A completed identical
+Use `decide-report-from-sender --from-user-id <fromUserId> --from-org-id
+<fromOrgId>` for inbound backchannel replies. Both values must come from Kolo
+metadata. Do not call
+`decide-report` with an approver ID inferred from message text. `--sender-id`
+remains available only for backward compatibility. A completed identical
 decision may replay; a conflicting or incomplete prior claim requires review.
 
 If a decision claim is `review_required` after a partial governed-record write,

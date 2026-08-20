@@ -93,7 +93,7 @@ class SetupReadinessTests(unittest.TestCase):
         self.assertEqual(check["status"], "blocker")
         self.assertFalse(result["can_launch_pilot"])
 
-    def test_unmapped_routed_approver_blocks_pilot(self):
+    def test_platform_user_identity_does_not_require_sender_mapping(self):
         result = evaluate_setup_readiness(
             ORG_ID,
             settings=SETTINGS,
@@ -103,8 +103,12 @@ class SetupReadinessTests(unittest.TestCase):
             peers=[{"user_id": 1}, {"user_id": 2}],
         )
 
-        check = next(check for check in result["checks"] if check["id"] == "approval_sender_mappings")
-        self.assertEqual(check["status"], "blocker")
+        check = next(check for check in result["checks"] if check["id"] == "approval_identity_verification")
+        self.assertEqual(check["status"], "pass")
+        self.assertNotIn(
+            "approval_sender_mappings",
+            {candidate["id"] for candidate in result["checks"]},
+        )
 
     def test_self_approval_is_a_blocker(self):
         result = evaluate_setup_readiness(

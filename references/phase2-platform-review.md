@@ -27,10 +27,10 @@ the sequence, subject to the constraints below.
   self-approval.
 - Backchannel messages must contain object IDs and summaries, not sensitive
   financial data or receipt contents.
-- Inbound `sender_id` values may be UUIDs while `kolo list-peers` uses integer
-  user IDs. Known mappings live on `skill.user_profile`. Unmatched UUIDs create
-  a held `skill.identity_discovery` record for administrator mapping; the skill
-  never guesses the relationship.
+- Backchannel messages expose platform-stamped integer `fromUserId` values in
+  the same identity namespace used by `kolo list-peers` and `contact-agent`.
+  ExpenseFlow uses `fromUserId` directly for approval decisions. Legacy
+  `sender_id` mappings remain optional for older message surfaces.
 
 ## Backchannel Safety Contract
 
@@ -47,8 +47,9 @@ The corrected contract is:
 - Reserve deterministic notification and task events before side effects.
 - Never automatically repeat an unknown message or task outcome.
 - Include `approval_request_id` in every approval message.
-- Resolve replies by explicit request ID or exact queue ID and a unique same-org
-  sender mapping.
+- Resolve replies by explicit request ID or exact stored outbound queue ID and
+  require platform `fromUserId` to match the assigned approver. If no correlator
+  is available, infer only when that approver has exactly one pending request.
 - Claim each approval request before writing one deterministic decision.
 - Treat incomplete claims and conflicting replies as manual-review conditions.
 

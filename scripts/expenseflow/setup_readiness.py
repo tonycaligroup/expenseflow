@@ -302,34 +302,18 @@ def _approval_checks(checks, approval_policy, profiles, department_policies, app
                 "Every active submitter has a valid non-self approver route.",
             )
         )
-    profiles_by_id = {str(profile.get("user_id")): profile for profile in profiles}
     active_approver_ids = {
         str(profile.get("user_id"))
         for profile in profiles
         if profile.get("status") == "active" and profile.get("can_approve")
     }
-    invalid_sender_mappings = []
-    for approver_id in sorted(active_approver_ids):
-        sender_id = profiles_by_id.get(approver_id, {}).get("sender_id")
-        sender_match_count = len([profile for profile in profiles if sender_id and profile.get("sender_id") == sender_id])
-        if not sender_id or sender_match_count != 1:
-            invalid_sender_mappings.append(approver_id)
-    if invalid_sender_mappings:
+    if active_approver_ids:
         checks.append(
             _check(
-                "approval_sender_mappings",
-                "blocker",
-                "One or more active approvers lacks a unique backchannel sender mapping.",
-                "Map each active approver's sender UUID to exactly one active ExpenseFlow profile.",
-                details={"user_ids": invalid_sender_mappings},
-            )
-        )
-    elif active_approver_ids:
-        checks.append(
-            _check(
-                "approval_sender_mappings",
+                "approval_identity_verification",
                 "pass",
-                "Every active approver has a unique backchannel sender mapping.",
+                "Kolo platform user IDs can be matched directly to active ExpenseFlow approvers.",
+                details={"user_ids": sorted(active_approver_ids)},
             )
         )
     try:

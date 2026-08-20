@@ -14,6 +14,7 @@ from expenseflow.kolo_workflows import (
     configure_organization,
     decide_report_approval,
     decide_report_approval_from_sender,
+    decide_report_approval_from_user,
     export_approved_report_csv,
     export_approved_report_sheets,
     map_sender_identity,
@@ -192,6 +193,20 @@ def cmd_decide_report(args, gateway):
 
 
 def cmd_decide_report_from_sender(args, gateway):
+    if args.from_user_id is not None:
+        return _ok(
+            result=decide_report_approval_from_user(
+                gateway,
+                args.from_user_id,
+                args.decision,
+                args.org_id,
+                from_org_id=args.from_org_id,
+                approval_request_id=args.approval_request_id,
+                queue_id=args.queue_id,
+                note=args.note,
+                decision_id=args.decision_id,
+            )
+        )
     return _ok(
         result=decide_report_approval_from_sender(
             gateway,
@@ -365,7 +380,10 @@ def main(argv=None):
     cmd.set_defaults(func=cmd_decide_report)
 
     cmd = sub.add_parser("decide-report-from-sender")
-    cmd.add_argument("--sender-id", required=True)
+    identity = cmd.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--from-user-id", type=int)
+    identity.add_argument("--sender-id")
+    cmd.add_argument("--from-org-id")
     cmd.add_argument("--decision", choices=["approved", "rejected"], required=True)
     cmd.add_argument("--approval-request-id")
     cmd.add_argument("--queue-id")

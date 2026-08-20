@@ -910,6 +910,7 @@ def decide_report_approval(
     note=None,
     decision_id=None,
     org_id=None,
+    source_metadata=None,
 ):
     approver_user_id = _normalize_user_id(approver_user_id)
     approval_request = _payload(gateway.get_record(APPROVAL_REQUEST, approval_request_id))
@@ -944,6 +945,8 @@ def decide_report_approval(
         decision_id=deterministic_decision_id,
     )
     result["approval_decision"]["org_id"] = resolved_org_id
+    if source_metadata:
+        result["approval_decision"]["source_metadata"] = dict(source_metadata)
     result["approval_request"]["reminder_status"] = "resolved"
     result["approval_request"]["next_reminder_at"] = None
     claim = {
@@ -955,6 +958,8 @@ def decide_report_approval(
         "claimed_at": utc_now(),
         "schema_version": 1,
     }
+    if source_metadata:
+        claim["source_metadata"] = dict(source_metadata)
     reservation = gateway.upsert_record(APPROVAL_DECISION_CLAIM, claim_id, claim, "claimed")
     if not reservation.get("created", False):
         raise ExpenseFlowError(
@@ -1052,7 +1057,13 @@ def decide_report_approval_from_sender(
             "Approval sender is not an active ExpenseFlow approver.",
             details={"user_id": approver.get("user_id")},
         )
-    request = _resolve_inbound_approval_request(gateway, org_id, approval_request_id, queue_id)
+    request = _resolve_inbound_approval_request(
+        gateway,
+        org_id,
+        approval_request_id,
+        queue_id,
+        approver_user_id=approver["user_id"],
+    )
     return decide_report_approval(
         gateway,
         request["approval_request_id"],
@@ -1061,6 +1072,60 @@ def decide_report_approval_from_sender(
         note=note,
         decision_id=decision_id,
         org_id=org_id,
+    )
+
+
+def decide_report_approval_from_user(
+    gateway,
+    from_user_id,
+    decision,
+    org_id,
+    from_org_id=None,
+    approval_request_id=None,
+    queue_id=None,
+    note=None,
+    decision_id=None,
+):
+    approver_user_id = _normalize_user_id(from_user_id)
+    if type(approver_user_id) is not int:
+        raise ExpenseFlowError(
+            "invalid_from_user_id",
+            "Kolo fromUserId must be an integer from trusted backchannel metadata.",
+        )
+    if not str(from_org_id or "").strip():
+        raise ExpenseFlowError(
+            "missing_from_org_id",
+            "Kolo fromOrgId is required with fromUserId backchannel decisions.",
+        )
+    if str(from_org_id) != str(org_id):
+        raise ExpenseFlowError(
+            "organization_mismatch",
+            "The backchannel sender organization does not match this ExpenseFlow organization.",
+            details={"expected_org_id": str(org_id), "actual_org_id": str(from_org_id)},
+        )
+    approver = _approval_profile_for_user(gateway, approver_user_id, org_id)
+    request = _resolve_inbound_approval_request(
+        gateway,
+        org_id,
+        approval_request_id,
+        queue_id,
+        approver_user_id=approver_user_id,
+        allow_pending_inference=True,
+    )
+    return decide_report_approval(
+        gateway,
+        request["approval_request_id"],
+        approver["user_id"],
+        decision,
+        note=note,
+        decision_id=decision_id,
+        org_id=org_id,
+        source_metadata={
+            "channel": "kolo_backchannel",
+            "from_user_id": approver_user_id,
+            "from_org_id": str(from_org_id),
+            "queue_id": queue_id,
+        },
     )
 
 
@@ -1449,8 +1514,15 @@ def _complete_approval_task(gateway, approval_request):
         approval_request["task_completion_error"] = exc.code
 
 
-def _resolve_inbound_approval_request(gateway, org_id, approval_request_id, queue_id):
-    if not approval_request_id and not queue_id:
+def _resolve_inbound_approval_request(
+    gateway,
+    org_id,
+    approval_request_id,
+    queue_id,
+    approver_user_id=None,
+    allow_pending_inference=False,
+):
+    if not approval_request_id and not queue_id and not allow_pending_inference:
         raise ExpenseFlowError(
             "missing_approval_correlation",
             "Approval replies require an approval request ID or an exact backchannel queue ID.",
@@ -1466,18 +1538,65 @@ def _resolve_inbound_approval_request(gateway, org_id, approval_request_id, queu
             if str(candidate.get("org_id", org_id)) == str(org_id)
             and candidate.get("backchannel_queue_id") == queue_id
         ]
-        if len(queue_matches) != 1:
+        if len(queue_matches) > 1:
             raise ExpenseFlowError(
-                "ambiguous_approval_correlation" if queue_matches else "approval_correlation_not_found",
+                "ambiguous_approval_correlation",
                 "Backchannel queue ID must identify exactly one approval request in this organization.",
                 details={"queue_id": queue_id, "match_count": len(queue_matches)},
             )
-        if request is not None and request.get("approval_request_id") != queue_matches[0].get("approval_request_id"):
+        if len(queue_matches) == 1 and request is not None and request.get("approval_request_id") != queue_matches[0].get(
+            "approval_request_id"
+        ):
             raise ExpenseFlowError(
                 "approval_correlation_conflict",
                 "Approval request ID and queue ID refer to different requests.",
             )
-        request = queue_matches[0]
+        if len(queue_matches) == 1:
+            request = queue_matches[0]
+        elif not allow_pending_inference:
+            raise ExpenseFlowError(
+                "approval_correlation_not_found",
+                "Backchannel queue ID does not identify an approval request in this organization.",
+                details={"queue_id": queue_id, "match_count": 0},
+            )
+    if request is None and allow_pending_inference:
+        pending_matches = [
+            candidate
+            for candidate in (_payload(record) for record in gateway.list_records(APPROVAL_REQUEST))
+            if str(candidate.get("org_id", org_id)) == str(org_id)
+            and candidate.get("status") == "pending"
+            and _normalize_user_id(candidate.get("approver_user_id")) == _normalize_user_id(approver_user_id)
+        ]
+        if len(pending_matches) != 1:
+            raise ExpenseFlowError(
+                "ambiguous_pending_approvals" if pending_matches else "no_pending_approval_for_user",
+                "Approval replies without an exact request ID require exactly one pending request for the approver.",
+                details={
+                    "approver_user_id": approver_user_id,
+                    "match_count": len(pending_matches),
+                    "approval_request_ids": sorted(
+                        candidate.get("approval_request_id") for candidate in pending_matches
+                    ),
+                },
+            )
+        request = pending_matches[0]
+    if request is None:
+        raise ExpenseFlowError(
+            "missing_approval_correlation",
+            "Approval replies require an approval request ID or an exact backchannel queue ID.",
+        )
+    if approver_user_id is not None and _normalize_user_id(request.get("approver_user_id")) != _normalize_user_id(
+        approver_user_id
+    ):
+        raise ExpenseFlowError(
+            "wrong_approver",
+            "Only the assigned approver can decide this approval request.",
+            details={
+                "approval_request_id": request.get("approval_request_id"),
+                "expected_approver_user_id": request.get("approver_user_id"),
+                "actual_approver_user_id": approver_user_id,
+            },
+        )
     return request
 
 
@@ -2535,6 +2654,35 @@ def _profiles_for_sender(gateway, sender_id, org_id):
         for profile in (_payload(record) for record in gateway.list_records(USER_PROFILE))
         if profile.get("sender_id") == sender_id and str(profile.get("org_id", org_id)) == str(org_id)
     ]
+
+
+def _approval_profile_for_user(gateway, user_id, org_id):
+    matches = [
+        profile
+        for profile in (_payload(record) for record in gateway.list_records(USER_PROFILE))
+        if _normalize_user_id(profile.get("user_id")) == user_id
+        and str(profile.get("org_id", org_id)) == str(org_id)
+    ]
+    if not matches:
+        raise ExpenseFlowError(
+            "unknown_approval_user",
+            "Kolo fromUserId is not an ExpenseFlow user in this organization.",
+            details={"from_user_id": user_id},
+        )
+    if len(matches) != 1:
+        raise ExpenseFlowError(
+            "ambiguous_approval_identity",
+            "Kolo fromUserId matches more than one ExpenseFlow profile.",
+            details={"from_user_id": user_id, "match_count": len(matches)},
+        )
+    approver = matches[0]
+    if approver.get("status") != "active" or not approver.get("can_approve"):
+        raise ExpenseFlowError(
+            "ineligible_approval_user",
+            "Kolo fromUserId does not belong to an active ExpenseFlow approver.",
+            details={"from_user_id": user_id},
+        )
+    return approver
 
 
 def _hold_for_identity_mapping(gateway, expense_data, settings, sender_id, org_id, expense_id):

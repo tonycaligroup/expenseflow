@@ -70,11 +70,38 @@ class ExpenseFlowKoloCliTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(decide.call_args.args[2], 272086)
 
-    def test_inbound_decision_passes_sender_and_correlation(self):
+    def test_inbound_decision_passes_platform_user_and_correlation(self):
         args = SimpleNamespace(
+            from_user_id=272086,
+            sender_id=None,
+            decision="approved",
+            org_id="org_1",
+            from_org_id="org_1",
+            approval_request_id="ar_1",
+            queue_id="queue_1",
+            note=None,
+            decision_id=None,
+        )
+
+        with patch.object(
+            expenseflow_kolo_cli,
+            "decide_report_approval_from_user",
+            return_value={"ok": True},
+        ) as decide:
+            result = expenseflow_kolo_cli.cmd_decide_report_from_sender(args, gateway=object())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(decide.call_args.args[1:4], (272086, "approved", "org_1"))
+        self.assertEqual(decide.call_args.kwargs["from_org_id"], "org_1")
+        self.assertEqual(decide.call_args.kwargs["approval_request_id"], "ar_1")
+
+    def test_inbound_decision_keeps_legacy_sender_support(self):
+        args = SimpleNamespace(
+            from_user_id=None,
             sender_id="sender-uuid",
             decision="approved",
             org_id="org_1",
+            from_org_id=None,
             approval_request_id="ar_1",
             queue_id="queue_1",
             note=None,
@@ -90,7 +117,6 @@ class ExpenseFlowKoloCliTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(decide.call_args.args[1:4], ("sender-uuid", "approved", "org_1"))
-        self.assertEqual(decide.call_args.kwargs["approval_request_id"], "ar_1")
 
     def test_reconcile_decision_requires_explicit_stale_confirmation(self):
         args = SimpleNamespace(
