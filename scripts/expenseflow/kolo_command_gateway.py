@@ -111,6 +111,37 @@ class KoloCommandGateway:
             )
         return peers
 
+    def discover_organization(self):
+        """Return organization scope without exposing the member directory."""
+        peers = self.list_peers()
+        if not peers:
+            raise ExpenseFlowError(
+                "organization_not_found",
+                "Kolo list-peers returned no organization members.",
+            )
+
+        missing_org_count = sum(1 for peer in peers if not peer.get("org_id"))
+        if missing_org_count:
+            raise ExpenseFlowError(
+                "invalid_kolo_response",
+                "Kolo list-peers returned members without an organization ID.",
+                details={"missing_org_count": missing_org_count},
+            )
+
+        org_ids = sorted({str(peer["org_id"]) for peer in peers})
+        if len(org_ids) != 1:
+            raise ExpenseFlowError(
+                "ambiguous_organization",
+                "Kolo list-peers returned members from more than one organization.",
+                details={"organization_count": len(org_ids)},
+            )
+
+        return {
+            "org_id": org_ids[0],
+            "member_count": len(peers),
+            "source": "kolo list-peers",
+        }
+
     def contact_agent(self, target_user_id, message):
         result = self.runner(["kolo", "contact-agent", "-t", str(target_user_id), "-m", message])
         queue_id = result.get("queueId") or result.get("queue_id")

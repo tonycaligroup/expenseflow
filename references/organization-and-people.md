@@ -4,7 +4,7 @@ Read this reference for setup, employee lifecycle, approver configuration, deleg
 
 ## Setup Sequence
 
-1. Obtain the actual Kolo organization UUID; never pilot with `default`.
+1. Obtain the actual Kolo organization UUID with `PYTHONPATH=scripts python3 scripts/expenseflow_kolo_cli.py discover-org`; never pilot with `default`. This performs exactly one `kolo list-peers` call, validates that every returned member has the same organization ID, and returns only the ID, member count, and source. Do not try `kolo org`, `kolo ping`, environment inspection, or other fallback probes. If the user requested only the organization ID, stop here.
 2. Discover members with `kolo list-peers`.
 3. Create `skill.expense_settings`, including at least one `expense_admin_user_id` or `expense_admin_user_ids` value.
 4. Configure default and fallback approvers in `skill.approval_policy`.

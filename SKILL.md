@@ -15,6 +15,8 @@ Never hand-compute totals, invent accounting data, or finalize an approval from 
 
 Commands print compact JSON by default. Read the status, relevant IDs, warnings, checks needing attention, and `next_action`. Put `--verbose` before the subcommand only when complete workflow records are needed for diagnosis.
 
+Run one packaged deterministic command per requested step and stop at the user's boundary. Do not probe alternate Kolo commands, environment variables, or config files when a packaged command exists. If that command fails, report its concise error and next safe action instead of exploring the runtime.
+
 Use Kolo governed records as the production source of truth. Do not use workspace JSON as state. Every write requires a deterministic external ID, and payload `status` must match the governed record status. Use UTC ISO-8601 instants and separate date-only business fields.
 
 Do not collect or store bank account numbers, routing numbers, payment-card numbers, SSNs, or tax IDs. Store safe receipt references and reimbursement status only. Follow [security-and-data-handling.md](references/security-and-data-handling.md).
@@ -35,7 +37,7 @@ Do not load every reference for routine expense capture or a simple status quest
 
 Use the Kolo runtime CLI for production workflows. Command groups are:
 
-- Setup: `configure-org`, `upsert-settings`, `upsert-approval-policy`, `upsert-department-policy`, `upsert-destination`, `setup-readiness`.
+- Setup: `discover-org`, `configure-org`, `upsert-settings`, `upsert-approval-policy`, `upsert-department-policy`, `upsert-destination`, `setup-readiness`.
 - People: `upsert-user`, `reconcile-users`, `capture-with-discovery`, `map-sender`, `approve-onboarding`, `acknowledge-policy`, `upsert-delegation`.
 - Expenses: `capture-expense`, `attach-receipt`, `upload-receipt`.
 - Reports: `submit-report`, `decide-report-from-sender`, `reconcile-approval-decision`, `send-reminders`.

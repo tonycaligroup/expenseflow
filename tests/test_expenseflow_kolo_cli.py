@@ -185,6 +185,58 @@ class ExpenseFlowKoloCliTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         readiness.assert_called_once_with(gateway, "org_1", verify_destination=False)
 
+    def test_discover_org_uses_one_deterministic_gateway_operation(self):
+        gateway = SimpleNamespace(
+            discover_organization=lambda: {
+                "org_id": "org_1",
+                "member_count": 2,
+                "source": "kolo list-peers",
+            }
+        )
+
+        result = expenseflow_kolo_cli.cmd_discover_org(SimpleNamespace(), gateway)
+
+        self.assertEqual(
+            result,
+            {
+                "status": "ok",
+                "result": {
+                    "org_id": "org_1",
+                    "member_count": 2,
+                    "source": "kolo list-peers",
+                },
+            },
+        )
+
+    def test_main_discover_org_prints_only_compact_scope(self):
+        gateway = SimpleNamespace(
+            discover_organization=lambda: {
+                "org_id": "org_1",
+                "member_count": 2,
+                "source": "kolo list-peers",
+            }
+        )
+        output = StringIO()
+
+        with (
+            patch.object(expenseflow_kolo_cli, "KoloCommandGateway", return_value=gateway),
+            redirect_stdout(output),
+        ):
+            exit_code = expenseflow_kolo_cli.main(["discover-org"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {
+                "status": "ok",
+                "result": {
+                    "org_id": "org_1",
+                    "member_count": 2,
+                    "source": "kolo list-peers",
+                },
+            },
+        )
+
     def test_decide_report_casts_approver_user_id_to_int(self):
         args = SimpleNamespace(
             approval_request_id="ar_1",

@@ -79,6 +79,7 @@ _COMPACT_SCALAR_FIELDS = {
     "execution_check_count",
     "error_code",
     "message",
+    "source",
 }
 
 _COMPACT_LIST_FIELDS = {
@@ -222,6 +223,10 @@ def cmd_configure_org(args, gateway):
 
 def cmd_reconcile_users(args, gateway):
     return _ok(result=reconcile_user_directory(gateway, args.org_id, args.deactivate_missing))
+
+
+def cmd_discover_org(args, gateway):
+    return _ok(result=gateway.discover_organization())
 
 
 def cmd_setup_readiness(args, gateway):
@@ -462,6 +467,9 @@ def main(argv=None):
     cmd = sub.add_parser("reconcile-users")
     cmd.add_argument("--deactivate-missing", action="store_true")
     cmd.set_defaults(func=cmd_reconcile_users)
+
+    cmd = sub.add_parser("discover-org")
+    cmd.set_defaults(func=cmd_discover_org)
 
     cmd = sub.add_parser("setup-readiness")
     cmd.add_argument("--skip-integration-check", action="store_true")

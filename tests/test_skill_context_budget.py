@@ -23,6 +23,13 @@ class SkillContextBudgetTests(unittest.TestCase):
             self.assertIn(reference, skill)
             self.assertTrue((ROOT / "references" / reference).is_file())
 
+    def test_skill_requires_packaged_commands_and_respects_user_boundary(self):
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("Run one packaged deterministic command per requested step", skill)
+        self.assertIn("stop at the user's boundary", skill)
+        self.assertIn("discover-org", skill)
+
 
 if __name__ == "__main__":
     unittest.main()

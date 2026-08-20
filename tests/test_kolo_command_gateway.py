@@ -150,6 +150,54 @@ class KoloCommandGatewayTests(unittest.TestCase):
         self.assertEqual(peers, [{"user_id": 7, "display_name": "New Employee", "org_id": "org_1"}])
         self.assertEqual(runner.commands[0], ["kolo", "list-peers"])
 
+    def test_discover_organization_returns_scope_without_peer_details(self):
+        runner = ScriptedRunner(
+            [
+                {
+                    "peers": [
+                        {"userId": "7", "displayName": "New Employee", "orgId": "org_1"},
+                        {"userId": "8", "displayName": "Approver", "orgId": "org_1"},
+                    ]
+                }
+            ]
+        )
+        gateway = KoloCommandGateway(runner=runner)
+
+        result = gateway.discover_organization()
+
+        self.assertEqual(
+            result,
+            {"org_id": "org_1", "member_count": 2, "source": "kolo list-peers"},
+        )
+        self.assertEqual(runner.commands, [["kolo", "list-peers"]])
+
+    def test_discover_organization_rejects_mixed_orgs(self):
+        gateway = KoloCommandGateway(
+            runner=ScriptedRunner(
+                [
+                    [
+                        {"userId": "7", "displayName": "One", "orgId": "org_1"},
+                        {"userId": "8", "displayName": "Two", "orgId": "org_2"},
+                    ]
+                ]
+            )
+        )
+
+        with self.assertRaises(ExpenseFlowError) as ctx:
+            gateway.discover_organization()
+
+        self.assertEqual(ctx.exception.code, "ambiguous_organization")
+
+    def test_discover_organization_requires_member_org_ids(self):
+        gateway = KoloCommandGateway(
+            runner=ScriptedRunner([[{"userId": "7", "displayName": "New Employee"}]])
+        )
+
+        with self.assertRaises(ExpenseFlowError) as ctx:
+            gateway.discover_organization()
+
+        self.assertEqual(ctx.exception.code, "invalid_kolo_response")
+
     def test_create_task_accepts_task_id_variants(self):
         gateway = KoloCommandGateway(runner=ScriptedRunner([{"task": {"task_id": "task_1", "status": "not_started"}}]))
 
