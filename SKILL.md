@@ -63,6 +63,7 @@ Use `scripts/expenseflow_kolo_cli.py` for Kolo runtime flows:
 - `submit-report`
 - `decide-report`
 - `decide-report-from-sender`
+- `reconcile-approval-decision`
 - `attach-receipt`
 - `upload-receipt`
 - `send-reminders`
@@ -337,6 +338,13 @@ Approval replies:
 Use `decide-report-from-sender` for inbound backchannel replies. Do not call
 `decide-report` with an approver ID inferred by the model. A completed identical
 decision may replay; a conflicting or incomplete prior claim requires review.
+
+If a decision claim is `review_required` after a partial governed-record write,
+run `reconcile-approval-decision` for that request. It requires exactly one
+persisted decision and only completes missing report, request, and expense state
+that is still pending or already matches that decision. It never rolls back or
+guesses a decision. A claim still marked `claimed` requires explicit stale-claim
+confirmation and must be at least 15 minutes old.
 
 Report statuses:
 

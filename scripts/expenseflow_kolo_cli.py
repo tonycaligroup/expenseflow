@@ -18,6 +18,7 @@ from expenseflow.kolo_workflows import (
     export_approved_report_sheets,
     map_sender_identity,
     organization_setup_readiness,
+    reconcile_approval_decision,
     refresh_qbo_reference_cache,
     reconcile_user_directory,
     send_due_approval_reminders,
@@ -205,6 +206,18 @@ def cmd_decide_report_from_sender(args, gateway):
     )
 
 
+def cmd_reconcile_approval_decision(args, gateway):
+    return _ok(
+        result=reconcile_approval_decision(
+            gateway,
+            args.approval_request_id,
+            args.org_id,
+            confirm_stale_claim=args.confirm_stale_claim,
+            as_of=args.as_of,
+        )
+    )
+
+
 def cmd_export_csv(args, gateway):
     return _ok(result=export_approved_report_csv(gateway, args.report_id))
 
@@ -359,6 +372,12 @@ def main(argv=None):
     cmd.add_argument("--note")
     cmd.add_argument("--decision-id")
     cmd.set_defaults(func=cmd_decide_report_from_sender)
+
+    cmd = sub.add_parser("reconcile-approval-decision")
+    cmd.add_argument("--approval-request-id", required=True)
+    cmd.add_argument("--confirm-stale-claim", action="store_true")
+    cmd.add_argument("--as-of")
+    cmd.set_defaults(func=cmd_reconcile_approval_decision)
 
     cmd = sub.add_parser("export-csv")
     cmd.add_argument("--report-id", required=True)

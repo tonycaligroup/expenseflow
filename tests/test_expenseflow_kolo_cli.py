@@ -92,6 +92,25 @@ class ExpenseFlowKoloCliTests(unittest.TestCase):
         self.assertEqual(decide.call_args.args[1:4], ("sender-uuid", "approved", "org_1"))
         self.assertEqual(decide.call_args.kwargs["approval_request_id"], "ar_1")
 
+    def test_reconcile_decision_requires_explicit_stale_confirmation(self):
+        args = SimpleNamespace(
+            approval_request_id="ar_1",
+            org_id="org_1",
+            confirm_stale_claim=True,
+            as_of="2026-08-20T00:00:00Z",
+        )
+
+        with patch.object(
+            expenseflow_kolo_cli,
+            "reconcile_approval_decision",
+            return_value={"status": "reconciled"},
+        ) as reconcile:
+            result = expenseflow_kolo_cli.cmd_reconcile_approval_decision(args, gateway=object())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(reconcile.call_args.kwargs["confirm_stale_claim"])
+        self.assertEqual(reconcile.call_args.kwargs["as_of"], "2026-08-20T00:00:00Z")
+
     def test_attach_receipt_casts_actor_and_loads_attachment(self):
         args = SimpleNamespace(
             expense_id="exp_1",

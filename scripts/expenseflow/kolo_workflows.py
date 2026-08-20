@@ -990,14 +990,8 @@ def decide_report_approval(
         claim["completed_at"] = utc_now()
         gateway.upsert_record(APPROVAL_DECISION_CLAIM, claim_id, claim, claim["status"])
         raise
-    task_id = result["approval_request"].get("task_id")
-    if task_id:
-        try:
-            completed_task = gateway.complete_task(task_id)
-            result["approval_request"]["task_completion_status"] = completed_task.get("status", "completed")
-        except ExpenseFlowError as exc:
-            result["approval_request"]["task_completion_status"] = "failed"
-            result["approval_request"]["task_completion_error"] = exc.code
+    if result["approval_request"].get("task_id"):
+        _complete_approval_task(gateway, result["approval_request"])
         gateway.upsert_record(
             APPROVAL_REQUEST,
             approval_request_id,
@@ -1068,6 +1062,145 @@ def decide_report_approval_from_sender(
         decision_id=decision_id,
         org_id=org_id,
     )
+
+
+def reconcile_approval_decision(
+    gateway,
+    approval_request_id,
+    org_id,
+    confirm_stale_claim=False,
+    as_of=None,
+):
+    claim_id = f"{org_id}:{approval_request_id}"
+    claim = _payload(gateway.get_record(APPROVAL_DECISION_CLAIM, claim_id))
+    _require_record_org(claim, org_id, "approval decision claim")
+    if claim.get("status") == "complete":
+        request = _payload(gateway.get_record(APPROVAL_REQUEST, approval_request_id))
+        return _resolve_existing_decision_claim(
+            gateway,
+            claim,
+            request,
+            _normalize_user_id(claim.get("approver_user_id")),
+            claim.get("decision"),
+            claim.get("note"),
+        )
+    if claim.get("status") == "claimed":
+        if not confirm_stale_claim:
+            raise ExpenseFlowError(
+                "approval_decision_still_claimed",
+                "The decision claim may still be active. Confirm it is stale before reconciliation.",
+                details={"approval_request_id": approval_request_id},
+            )
+        claimed_at = parse_utc(claim.get("claimed_at"), "claimed_at")
+        reconciliation_time = parse_utc(as_of or utc_now(), "as_of")
+        if (reconciliation_time - claimed_at).total_seconds() < 900:
+            raise ExpenseFlowError(
+                "approval_decision_claim_not_stale",
+                "A claimed decision must be at least 15 minutes old before forced reconciliation.",
+                details={"approval_request_id": approval_request_id},
+            )
+    elif claim.get("status") != "review_required":
+        raise ExpenseFlowError(
+            "approval_decision_not_reconcilable",
+            "Only review-required or explicitly confirmed stale claims can be reconciled.",
+            details={"approval_request_id": approval_request_id, "claim_status": claim.get("status")},
+        )
+
+    decisions = [
+        decision
+        for decision in (_payload(record) for record in gateway.list_records(APPROVAL_DECISION))
+        if decision.get("approval_request_id") == approval_request_id
+        and str(decision.get("org_id", org_id)) == str(org_id)
+    ]
+    if len(decisions) != 1:
+        raise ExpenseFlowError(
+            "approval_decision_reconciliation_ambiguous",
+            "Reconciliation requires exactly one persisted approval decision.",
+            details={"approval_request_id": approval_request_id, "decision_count": len(decisions)},
+        )
+    decision_record = decisions[0]
+    request = _payload(gateway.get_record(APPROVAL_REQUEST, approval_request_id))
+    report = _payload(gateway.get_record(EXPENSE_REPORT, request["report_id"]))
+    expenses = [_payload(gateway.get_record(EXPENSE, expense_id)) for expense_id in report.get("expense_ids", [])]
+    _require_record_org(request, org_id, "approval request")
+    _require_record_org(report, org_id, "report")
+    for expense in expenses:
+        _require_record_org(expense, org_id, "expense")
+    if _normalize_user_id(decision_record.get("approver_user_id")) != _normalize_user_id(
+        request.get("approver_user_id")
+    ):
+        raise ExpenseFlowError(
+            "approval_decision_reconciliation_conflict",
+            "The persisted decision actor does not match the assigned approver.",
+            details={"approval_request_id": approval_request_id},
+        )
+
+    decision = decision_record.get("decision")
+    target_status = "approved" if decision == "approved" else "rejected" if decision == "rejected" else None
+    if target_status is None:
+        raise ExpenseFlowError(
+            "approval_decision_reconciliation_conflict",
+            "The persisted approval decision has an invalid decision value.",
+            details={"approval_request_id": approval_request_id, "decision": decision},
+        )
+    _require_reconcilable_status(report, {"pending_approval", target_status}, "report", report["report_id"])
+    _require_reconcilable_status(request, {"pending", decision}, "approval request", approval_request_id)
+    for expense in expenses:
+        _require_reconcilable_status(expense, {"submitted", target_status}, "expense", expense["expense_id"])
+
+    decided_at = decision_record.get("created_at") or utc_now()
+    report = dict(report)
+    report["status"] = target_status
+    if target_status == "approved":
+        report["approved_at"] = report.get("approved_at") or decided_at
+    request = dict(request)
+    request.update(
+        {
+            "status": decision,
+            "decided_at": request.get("decided_at") or decided_at,
+            "reminder_status": "resolved",
+            "next_reminder_at": None,
+        }
+    )
+    reconciled_expenses = []
+    for expense in expenses:
+        updated = dict(expense)
+        updated["status"] = target_status
+        reconciled_expenses.append(updated)
+
+    gateway.upsert_record(EXPENSE_REPORT, report["report_id"], report, report["status"])
+    gateway.upsert_record(APPROVAL_REQUEST, approval_request_id, request, request["status"])
+    for expense in reconciled_expenses:
+        gateway.upsert_record(EXPENSE, expense["expense_id"], expense, expense["status"])
+    _complete_approval_task(gateway, request)
+    gateway.upsert_record(APPROVAL_REQUEST, approval_request_id, request, request["status"])
+
+    claim.update(
+        {
+            "status": "complete",
+            "approval_decision_id": decision_record["approval_decision_id"],
+            "approver_user_id": decision_record["approver_user_id"],
+            "decision": decision,
+            "note": str(decision_record.get("note") or "").strip(),
+            "reconciled_at": utc_now(),
+            "completed_at": claim.get("completed_at") or utc_now(),
+        }
+    )
+    gateway.upsert_record(APPROVAL_DECISION_CLAIM, claim_id, claim, "complete")
+    gateway.log_action(
+        "skill.approval_decision",
+        "ExpenseFlow approval decision reconciled",
+        f"expenseflow:decision-reconciled:{decision_record['approval_decision_id']}",
+        {"org_id": org_id, "approval_request_id": approval_request_id, "decision": decision},
+    )
+    return {
+        "status": "reconciled",
+        "report": report,
+        "expenses": reconciled_expenses,
+        "approval_request": request,
+        "approval_decision": decision_record,
+        "approval_decision_claim": claim,
+    }
 
 
 def _submission_ids(org_id, submitter_user_id, expense_ids, report_id, approval_request_id):
@@ -1295,6 +1428,25 @@ def _resolve_existing_decision_claim(gateway, claim, request, approver_user_id, 
         "approval_request": completed_request,
         "approval_decision": approval_decision,
     }
+
+
+def _require_reconcilable_status(payload, allowed, entity, external_id):
+    if payload.get("status") not in allowed:
+        raise ExpenseFlowError(
+            "approval_decision_reconciliation_conflict",
+            f"The {entity} has a status that cannot be reconciled to this decision.",
+            details={"external_id": external_id, "status": payload.get("status"), "allowed": sorted(allowed)},
+        )
+
+
+def _complete_approval_task(gateway, approval_request):
+    try:
+        completed_task = gateway.complete_task(approval_request["task_id"])
+        approval_request["task_completion_status"] = completed_task.get("status", "completed")
+        approval_request.pop("task_completion_error", None)
+    except ExpenseFlowError as exc:
+        approval_request["task_completion_status"] = "failed"
+        approval_request["task_completion_error"] = exc.code
 
 
 def _resolve_inbound_approval_request(gateway, org_id, approval_request_id, queue_id):

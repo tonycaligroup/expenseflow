@@ -3,6 +3,7 @@ import unittest
 from scripts.expenseflow.errors import ExpenseFlowError
 from scripts.expenseflow.kolo_gateway import FakeKoloGateway
 from scripts.expenseflow.kolo_workflows import (
+    APPROVAL_DECISION,
     APPROVAL_DECISION_CLAIM,
     APPROVAL_REQUEST,
     EXPENSE,
@@ -12,6 +13,7 @@ from scripts.expenseflow.kolo_workflows import (
     capture_expense,
     decide_report_approval,
     decide_report_approval_from_sender,
+    reconcile_approval_decision,
     submit_report_for_approval,
     upsert_approval_policy,
     upsert_expense_settings,
@@ -57,6 +59,18 @@ class LostTaskAcknowledgementGateway(FakeKoloGateway):
             self.fail_task_once = False
             raise ExpenseFlowError("task_result_lost", "Task result was lost.")
         return result
+
+
+class PartialDecisionWriteGateway(FakeKoloGateway):
+    def __init__(self):
+        super().__init__()
+        self.fail_decision_request_write = False
+
+    def upsert_record(self, record_type, external_id, payload, status="active", schema_version=1):
+        if self.fail_decision_request_write and record_type == APPROVAL_REQUEST and status == "approved":
+            self.fail_decision_request_write = False
+            raise ExpenseFlowError("simulated_partial_write", "Simulated approval request write failure.")
+        return super().upsert_record(record_type, external_id, payload, status, schema_version)
 
 
 class BackchannelSafetyTests(unittest.TestCase):
@@ -249,6 +263,57 @@ class BackchannelSafetyTests(unittest.TestCase):
 
         self.assertEqual(claimed.exception.code, "approval_decision_review_required")
         self.assertEqual(gateway.get_record(EXPENSE_REPORT, "er_safe")["status"], "pending_approval")
+
+    def test_partial_decision_write_is_reconciled_from_persisted_decision(self):
+        gateway = self._configured_gateway(PartialDecisionWriteGateway())
+        self._capture(gateway)
+        self._submit(gateway)
+        gateway.fail_decision_request_write = True
+
+        with self.assertRaises(ExpenseFlowError) as partial:
+            decide_report_approval(gateway, "ar_safe", 2, "approved", org_id=ORG_ID)
+
+        self.assertEqual(partial.exception.code, "simulated_partial_write")
+        self.assertEqual(gateway.get_record(EXPENSE_REPORT, "er_safe")["status"], "approved")
+        self.assertEqual(gateway.get_record(APPROVAL_REQUEST, "ar_safe")["status"], "pending")
+        self.assertEqual(len(gateway.list_records(APPROVAL_DECISION)), 1)
+        claim = gateway.get_record(APPROVAL_DECISION_CLAIM, f"{ORG_ID}:ar_safe")
+        self.assertEqual(claim["status"], "review_required")
+
+        result = reconcile_approval_decision(gateway, "ar_safe", ORG_ID)
+
+        self.assertEqual(result["status"], "reconciled")
+        self.assertEqual(gateway.get_record(APPROVAL_REQUEST, "ar_safe")["status"], "approved")
+        self.assertEqual(gateway.get_record(EXPENSE, "exp_safe")["status"], "approved")
+        self.assertEqual(gateway.get_record(APPROVAL_DECISION_CLAIM, f"{ORG_ID}:ar_safe")["status"], "complete")
+
+    def test_reconciliation_refuses_active_or_decisionless_claim(self):
+        gateway = self._configured_gateway()
+        self._capture(gateway)
+        self._submit(gateway)
+        claim_id = f"{ORG_ID}:ar_safe"
+        gateway.upsert_record(
+            APPROVAL_DECISION_CLAIM,
+            claim_id,
+            {
+                "approval_decision_claim_id": claim_id,
+                "org_id": ORG_ID,
+                "approval_request_id": "ar_safe",
+                "report_id": "er_safe",
+                "status": "claimed",
+                "claimed_at": "2026-08-19T00:00:00Z",
+            },
+            "claimed",
+        )
+
+        with self.assertRaises(ExpenseFlowError) as active:
+            reconcile_approval_decision(gateway, "ar_safe", ORG_ID)
+        self.assertEqual(active.exception.code, "approval_decision_still_claimed")
+
+        gateway.set_record_status(APPROVAL_DECISION_CLAIM, claim_id, "review_required")
+        with self.assertRaises(ExpenseFlowError) as missing:
+            reconcile_approval_decision(gateway, "ar_safe", ORG_ID)
+        self.assertEqual(missing.exception.code, "approval_decision_reconciliation_ambiguous")
 
     def test_omitted_submission_ids_are_deterministic(self):
         gateway = self._configured_gateway()
